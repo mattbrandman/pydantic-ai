@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Union, cast, overload
 
 from openai.types.responses.response_code_interpreter_tool_call import ResultLogs
+from openai.types.responses.tool_param import CodeInterpreter
 from typing_extensions import assert_never
 
 from pydantic_ai.builtin_tools import WebSearchTool
@@ -132,7 +133,7 @@ class OpenAIResponsesModelSettings(OpenAIModelSettings, total=False):
     ALL FIELDS MUST BE `openai_` PREFIXED SO YOU CAN MERGE THEM WITH OTHER MODELS.
     """
 
-    openai_builtin_tools: Sequence[FileSearchToolParam | WebSearchToolParam | ComputerToolParam]
+    openai_builtin_tools: Sequence[FileSearchToolParam | WebSearchToolParam | ComputerToolParam | CodeInterpreter]
     """The provided OpenAI built-in tools to use.
 
     See [OpenAI's built-in tools](https://platform.openai.com/docs/guides/tools?api-mode=responses) for more details.
@@ -995,11 +996,11 @@ class OpenAIResponsesStreamedResponse(StreamedResponse):
 
             elif isinstance(chunk, responses.ResponseTextDeltaEvent):
                 yield self._parts_manager.handle_text_delta(vendor_part_id=chunk.content_index, content=chunk.delta)
-
             elif isinstance(chunk, responses.ResponseTextDoneEvent):
                 pass  # there's nothing we need to do here
 
             else:  # pragma: no cover
+                print(chunk)
                 warnings.warn(
                     f'Handling of this event type is not yet implemented. Please report on our GitHub: {chunk}',
                     UserWarning,
