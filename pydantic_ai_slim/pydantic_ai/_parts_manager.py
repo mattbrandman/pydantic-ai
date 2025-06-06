@@ -23,6 +23,8 @@ from pydantic_ai.messages import (
     ModelResponseStreamEvent,
     PartDeltaEvent,
     PartStartEvent,
+    ServerToolCallPart,
+    ServerToolCallPartDelta,
     TextPart,
     TextPartDelta,
     ToolCallPart,
@@ -36,11 +38,11 @@ VendorId = Hashable
 Type alias for a vendor identifier, which can be any hashable type (e.g., a string, UUID, etc.)
 """
 
-ManagedPart = Union[ModelResponsePart, ToolCallPartDelta]
+ManagedPart = Union[ModelResponsePart, ToolCallPartDelta, ServerToolCallPartDelta]
 """
 A union of types that are managed by the ModelResponsePartsManager.
 Because many vendors have streaming APIs that may produce not-fully-formed tool calls,
-this includes ToolCallPartDelta's in addition to the more fully-formed ModelResponsePart's.
+this includes ToolCallPartDelta's and ServerToolCallPartDelta's in addition to the more fully-formed ModelResponsePart's.
 """
 
 
@@ -57,12 +59,12 @@ class ModelResponsePartsManager:
     """Maps a vendor's "part" ID (if provided) to the index in `_parts` where that part resides."""
 
     def get_parts(self) -> list[ModelResponsePart]:
-        """Return only model response parts that are complete (i.e., not ToolCallPartDelta's).
+        """Return only model response parts that are complete (i.e., not ToolCallPartDelta's or ServerToolCallPartDelta's).
 
         Returns:
-            A list of ModelResponsePart objects. ToolCallPartDelta objects are excluded.
+            A list of ModelResponsePart objects. ToolCallPartDelta and ServerToolCallPartDelta objects are excluded.
         """
-        return [p for p in self._parts if not isinstance(p, ToolCallPartDelta)]
+        return [p for p in self._parts if not isinstance(p, (ToolCallPartDelta, ServerToolCallPartDelta))]
 
     def handle_text_delta(
         self,
@@ -245,3 +247,89 @@ class ModelResponsePartsManager:
                 self._parts.append(new_part)
             self._vendor_id_to_part_index[vendor_part_id] = new_part_index
         return PartStartEvent(index=new_part_index, part=new_part)
+
+    def handle_server_tool_call_delta(
+        self,
+        *,
+        vendor_part_id: Hashable | None,
+        tool_name: str | None,
+        args: str | dict[str, Any] | None,
+        tool_call_id: str | None,
+        model_name: str | None,
+    ) -> ModelResponseStreamEvent | None:
+        """Handle or update a server tool call, creating or updating a `ServerToolCallPart` or `ServerToolCallPartDelta`.
+
+        Managed items remain as `ServerToolCallPartDelta`s until they have at least a tool_name, at which
+        point they are upgraded to `ServerToolCallPart`s.
+
+        If `vendor_part_id` is None, updates the latest matching ServerToolCallPart (or ServerToolCallPartDelta)
+        if any. Otherwise, a new part (or delta) may be created.
+
+        Args:
+            vendor_part_id: The ID the vendor uses for this server tool call.
+                If None, the latest matching server tool call may be updated.
+            tool_name: The name of the server tool. If None, the manager does not enforce
+                a name match when `vendor_part_id` is None.
+            args: Arguments for the server tool call, either as a string, a dictionary of key-value pairs, or None.
+            tool_call_id: An optional string representing an identifier for this server tool call.
+            model_name: An optional string representing the model name that generated this server tool call.
+
+        Returns:
+            - A `PartStartEvent` if a new ServerToolCallPart is created.
+            - A `PartDeltaEvent` if an existing part is updated.
+            - `None` if no new event is emitted (e.g., the part is still incomplete).
+
+        Raises:
+            UnexpectedModelBehavior: If attempting to apply a server tool call delta to a part that is not
+                a ServerToolCallPart or ServerToolCallPartDelta.
+        """
+        existing_matching_part_and_index: tuple[ServerToolCallPartDelta | ServerToolCallPart, int] | None = None
+
+        if vendor_part_id is None:
+            # vendor_part_id is None, so check if the latest part is a matching server tool call or delta to update
+            # When the vendor_part_id is None, if the tool_name is _not_ None, assume this should be a new part rather
+            # than a delta on an existing one. We can change this behavior in the future if necessary for some model.
+            if tool_name is None and self._parts:
+                part_index = len(self._parts) - 1
+                latest_part = self._parts[part_index]
+                if isinstance(latest_part, (ServerToolCallPart, ServerToolCallPartDelta)):  # pragma: no branch
+                    existing_matching_part_and_index = latest_part, part_index
+        else:
+            # vendor_part_id is provided, so look up the corresponding part or delta
+            part_index = self._vendor_id_to_part_index.get(vendor_part_id)
+            if part_index is not None:
+                existing_part = self._parts[part_index]
+                if not isinstance(existing_part, (ServerToolCallPartDelta, ServerToolCallPart)):
+                    raise UnexpectedModelBehavior(f'Cannot apply a server tool call delta to {existing_part=}')
+                existing_matching_part_and_index = existing_part, part_index
+
+        if existing_matching_part_and_index is None:
+            # No matching part/delta was found, so create a new ServerToolCallPartDelta (or ServerToolCallPart if fully formed)
+            delta = ServerToolCallPartDelta(
+                tool_name_delta=tool_name, args_delta=args, tool_call_id=tool_call_id, model_name=model_name
+            )
+            part = delta.as_part() or delta
+            if vendor_part_id is not None:
+                self._vendor_id_to_part_index[vendor_part_id] = len(self._parts)
+            new_part_index = len(self._parts)
+            self._parts.append(part)
+            # Only emit a PartStartEvent if we have enough information to produce a full ServerToolCallPart
+            if isinstance(part, ServerToolCallPart):
+                return PartStartEvent(index=new_part_index, part=part)
+        else:
+            # Update the existing part or delta with the new information
+            existing_part, part_index = existing_matching_part_and_index
+            delta = ServerToolCallPartDelta(
+                tool_name_delta=tool_name, args_delta=args, tool_call_id=tool_call_id, model_name=model_name
+            )
+            updated_part = delta.apply(existing_part)
+            self._parts[part_index] = updated_part
+            if isinstance(updated_part, ServerToolCallPart):
+                if isinstance(existing_part, ServerToolCallPartDelta):
+                    # We just upgraded a delta to a full part, so emit a PartStartEvent
+                    return PartStartEvent(index=part_index, part=updated_part)
+                else:
+                    # We updated an existing part, so emit a PartDeltaEvent
+                    if updated_part.tool_call_id and not delta.tool_call_id:
+                        delta = replace(delta, tool_call_id=updated_part.tool_call_id)
+                    return PartDeltaEvent(index=part_index, delta=delta)

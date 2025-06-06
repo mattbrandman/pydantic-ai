@@ -30,6 +30,7 @@ from ..messages import (
     ModelResponseStreamEvent,
     RetryPromptPart,
     ServerToolCallPart,
+    ServerToolCallPartDelta,
     ServerToolReturnPart,
     SystemPromptPart,
     TextPart,
@@ -982,6 +983,7 @@ class OpenAIResponsesStreamedResponse(StreamedResponse):
                 self._usage += _map_usage(chunk.response)
 
             elif isinstance(chunk, responses.ResponseOutputItemAddedEvent):
+                print(chunk)
                 if isinstance(chunk.item, responses.ResponseFunctionToolCall):
                     yield self._parts_manager.handle_tool_call_part(
                         vendor_part_id=chunk.item.id,
@@ -995,12 +997,87 @@ class OpenAIResponsesStreamedResponse(StreamedResponse):
                 pass
 
             elif isinstance(chunk, responses.ResponseTextDeltaEvent):
-                yield self._parts_manager.handle_text_delta(vendor_part_id=chunk.content_index, content=chunk.delta)
+                yield self._parts_manager.handle_text_delta(vendor_part_id=chunk.item_id, content=chunk.delta)
             elif isinstance(chunk, responses.ResponseTextDoneEvent):
                 pass  # there's nothing we need to do here
 
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallCodeDeltaEvent):
+                # Handle incremental code updates for code interpreter
+                maybe_event = self._parts_manager.handle_server_tool_call_delta(
+                    vendor_part_id=chunk.item_id,  # type: ignore
+                    tool_name="code_interpreter_call",
+                    args={"code": chunk.delta, "status": "in_progress"},
+                    tool_call_id=str(chunk.item_id),  # type: ignore
+                    model_name=self._model_name,
+                )
+                if maybe_event is not None:
+                    yield maybe_event
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallCodeDoneEvent):
+                # Handle code completion for code interpreter
+                args = {"status": "interpreting"}
+                if chunk.code:
+                    args["code"] = chunk.code
+                
+                maybe_event = self._parts_manager.handle_server_tool_call_delta(
+                    vendor_part_id=chunk.item_id,  # type: ignore
+                    tool_name=None,  # Don't update tool name
+                    args=args,
+                    tool_call_id=chunk.item_id,  # type: ignore
+                    model_name=self._model_name,
+                )
+                if maybe_event is not None:
+                    yield maybe_event
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallInProgressEvent):
+                # Handle when code interpretation starts
+
+                tool_call = chunk.code_interpreter_call
+                args = {}
+                if tool_call:
+                    args = {
+                        "status": tool_call.status,
+                    }
+                    args["code"] = tool_call.code
+                if tool_call and tool_call.container_id:
+                    args["container_id"] = tool_call.container_id
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallInterpretingEvent):
+                # Handle when code is being interpreted
+                tool_call = chunk.code_interpreter_call
+                args = {}
+                if tool_call:
+                    args = {
+                        "status": tool_call.status,
+                    }
+                if tool_call and tool_call.code:
+                    args["code"] = tool_call.code
+                if tool_call and tool_call.container_id:
+                    args["container_id"] = tool_call.container_id
+                
+                maybe_event = self._parts_manager.handle_server_tool_call_delta(
+                    vendor_part_id=chunk.item_id,  # type: ignore
+                    tool_name=None,  # Don't update tool name
+                    args=args,
+                    tool_call_id=None,
+                    model_name=self._model_name,
+                )
+                if maybe_event is not None:
+                    yield maybe_event
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallCompletedEvent):
+                # Handle completed code interpreter call with results
+                maybe_event = self._parts_manager.handle_server_tool_call_delta(
+                    vendor_part_id=chunk.item_id,  # type: ignore
+                    tool_name=None,  # Don't update tool name
+                    args={"status": "completed"},
+                    tool_call_id=None,
+                    model_name=self._model_name,
+                )
+                if maybe_event is not None:
+                    yield maybe_event
+
             else:  # pragma: no cover
-                print(chunk)
                 warnings.warn(
                     f'Handling of this event type is not yet implemented. Please report on our GitHub: {chunk}',
                     UserWarning,
