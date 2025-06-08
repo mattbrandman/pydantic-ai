@@ -824,7 +824,149 @@ class ToolCallPartDelta:
     __repr__ = _utils.dataclasses_no_defaults_repr
 
 
-ModelResponsePartDelta = Annotated[Union[TextPartDelta, ToolCallPartDelta], pydantic.Discriminator('part_delta_kind')]
+@dataclass(repr=False)
+class ServerToolCallPartDelta:
+    """A partial update (delta) for a `ServerToolCallPart` to modify tool name, arguments, tool call ID, or model name."""
+
+    tool_name_delta: str | None = None
+    """Incremental text to add to the existing tool name, if any."""
+
+    args_delta: str | dict[str, Any] | None = None
+    """Incremental data to add to the tool arguments.
+
+    If this is a string, it will be appended to existing JSON arguments.
+    If this is a dict, it will be merged with existing dict arguments.
+    """
+
+    tool_call_id: str | None = None
+    """Optional tool call identifier, this is used by some models including OpenAI.
+
+    Note this is never treated as a delta — it can replace None, but otherwise if a
+    non-matching value is provided an error will be raised."""
+
+    model_name: str | None = None
+    """Optional model name that generated the response.
+
+    Note this is never treated as a delta — it can replace None, but otherwise if a
+    non-matching value is provided an error will be raised."""
+
+    part_delta_kind: Literal['server_tool_call'] = 'server_tool_call'
+    """Part delta type identifier, used as a discriminator."""
+
+    def as_part(self) -> ServerToolCallPart | None:
+        """Convert this delta to a fully formed `ServerToolCallPart` if possible, otherwise return `None`.
+
+        Returns:
+            A `ServerToolCallPart` if `tool_name_delta` is set, otherwise `None`.
+        """
+        if self.tool_name_delta is None:
+            return None
+
+        return ServerToolCallPart(
+            self.tool_name_delta, 
+            self.args_delta, 
+            self.tool_call_id or _generate_tool_call_id(),
+            self.model_name
+        )
+
+    @overload
+    def apply(self, part: ModelResponsePart) -> ServerToolCallPart: ...
+
+    @overload
+    def apply(self, part: ModelResponsePart | ServerToolCallPartDelta) -> ServerToolCallPart | ServerToolCallPartDelta: ...
+
+    def apply(self, part: ModelResponsePart | ServerToolCallPartDelta) -> ServerToolCallPart | ServerToolCallPartDelta:
+        """Apply this delta to a part or delta, returning a new part or delta with the changes applied.
+
+        Args:
+            part: The existing model response part or delta to update.
+
+        Returns:
+            Either a new `ServerToolCallPart` or an updated `ServerToolCallPartDelta`.
+
+        Raises:
+            ValueError: If `part` is neither a `ServerToolCallPart` nor a `ServerToolCallPartDelta`.
+            UnexpectedModelBehavior: If applying JSON deltas to dict arguments or vice versa.
+        """
+        if isinstance(part, ServerToolCallPart):
+            return self._apply_to_part(part)
+
+        if isinstance(part, ServerToolCallPartDelta):
+            return self._apply_to_delta(part)
+
+        raise ValueError(  # pragma: no cover
+            f'Can only apply ServerToolCallPartDeltas to ServerToolCallParts or ServerToolCallPartDeltas, not {part}'
+        )
+
+    def _apply_to_delta(self, delta: ServerToolCallPartDelta) -> ServerToolCallPart | ServerToolCallPartDelta:
+        """Internal helper to apply this delta to another delta."""
+        if self.tool_name_delta:
+            # Append incremental text to the existing tool_name_delta
+            updated_tool_name_delta = (delta.tool_name_delta or '') + self.tool_name_delta
+            delta = replace(delta, tool_name_delta=updated_tool_name_delta)
+
+        if isinstance(self.args_delta, str):
+            if isinstance(delta.args_delta, dict):
+                raise UnexpectedModelBehavior(
+                    f'Cannot apply JSON deltas to non-JSON tool arguments ({delta=}, {self=})'
+                )
+            updated_args_delta = (delta.args_delta or '') + self.args_delta
+            delta = replace(delta, args_delta=updated_args_delta)
+        elif isinstance(self.args_delta, dict):
+            if isinstance(delta.args_delta, str):
+                raise UnexpectedModelBehavior(
+                    f'Cannot apply dict deltas to non-dict tool arguments ({delta=}, {self=})'
+                )
+            updated_args_delta = {**(delta.args_delta or {}), **self.args_delta}
+            delta = replace(delta, args_delta=updated_args_delta)
+
+        if self.tool_call_id:
+            delta = replace(delta, tool_call_id=self.tool_call_id)
+
+        if self.model_name:
+            delta = replace(delta, model_name=self.model_name)
+
+        # If we now have enough data to create a full ServerToolCallPart, do so
+        if delta.tool_name_delta is not None:
+            return ServerToolCallPart(
+                delta.tool_name_delta, 
+                delta.args_delta, 
+                delta.tool_call_id or _generate_tool_call_id(),
+                delta.model_name
+            )
+
+        return delta
+
+    def _apply_to_part(self, part: ServerToolCallPart) -> ServerToolCallPart:
+        """Internal helper to apply this delta directly to a `ServerToolCallPart`."""
+        if self.tool_name_delta:
+            # Append incremental text to the existing tool_name
+            tool_name = part.tool_name + self.tool_name_delta
+            part = replace(part, tool_name=tool_name)
+
+        if isinstance(self.args_delta, str):
+            if isinstance(part.args, dict):
+                raise UnexpectedModelBehavior(f'Cannot apply JSON deltas to non-JSON tool arguments ({part=}, {self=})')
+            updated_json = (part.args or '') + self.args_delta
+            part = replace(part, args=updated_json)
+        elif isinstance(self.args_delta, dict):
+            if isinstance(part.args, str):
+                raise UnexpectedModelBehavior(f'Cannot apply dict deltas to non-dict tool arguments ({part=}, {self=})')
+            updated_dict = {**(part.args or {}), **self.args_delta}
+            part = replace(part, args=updated_dict)
+
+        if self.tool_call_id:
+            part = replace(part, tool_call_id=self.tool_call_id)
+
+        if self.model_name:
+            part = replace(part, model_name=self.model_name)
+
+        return part
+
+    __repr__ = _utils.dataclasses_no_defaults_repr
+
+
+ModelResponsePartDelta = Annotated[Union[TextPartDelta, ToolCallPartDelta, ServerToolCallPartDelta], pydantic.Discriminator('part_delta_kind')]
 """A partial update (delta) for any model response part."""
 
 
