@@ -1,7 +1,58 @@
 from __future__ import annotations
 
+from typing import Union
 from httpx import Timeout
 from typing_extensions import TypedDict
+
+
+def serialize_timeout(timeout: Union[float, Timeout]) -> Union[float, dict[str, float]]:
+    """Convert an httpx.Timeout object to a serializable format.
+    
+    Args:
+        timeout: Either a float or an httpx.Timeout object
+        
+    Returns:
+        Either a float (for simple timeouts) or a dict with timeout components
+    """
+    if isinstance(timeout, (int, float)):
+        return float(timeout)
+    elif isinstance(timeout, Timeout):
+        # Extract the individual timeout values
+        result: dict[str, float] = {}
+        if timeout.connect is not None:
+            result['connect'] = timeout.connect
+        if timeout.read is not None:
+            result['read'] = timeout.read
+        if timeout.write is not None:
+            result['write'] = timeout.write
+        if timeout.pool is not None:
+            result['pool'] = timeout.pool
+        return result if result else 5.0  # Default timeout if all are None
+    else:
+        raise TypeError(f"Expected float or Timeout, got {type(timeout)}")
+
+
+def deserialize_timeout(value: Union[float, dict[str, float]]) -> Union[float, Timeout]:
+    """Convert a serialized timeout value back to float or httpx.Timeout.
+    
+    Args:
+        value: Either a float or a dict with timeout components
+        
+    Returns:
+        Either a float or an httpx.Timeout object
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    elif isinstance(value, dict):
+        # Create Timeout with specific values
+        return Timeout(
+            connect=value.get('connect'),
+            read=value.get('read'),
+            write=value.get('write'),
+            pool=value.get('pool')
+        )
+    else:
+        raise TypeError(f"Expected float or dict, got {type(value)}")
 
 
 class ModelSettings(TypedDict, total=False):
