@@ -5,7 +5,7 @@ import warnings
 from collections.abc import AsyncIterable, AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Literal, Union, cast, overload
 
 from openai.types.responses.response_code_interpreter_tool_call import ResultLogs
@@ -17,7 +17,7 @@ from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers import Provider, infer_provider
 
 from .. import ModelHTTPError, UnexpectedModelBehavior, _utils, usage
-from .._utils import guard_tool_call_id as _guard_tool_call_id
+from .._utils import guard_tool_call_id as _guard_tool_call_id, number_to_datetime
 from ..messages import (
     AudioUrl,
     BinaryContent,
@@ -181,7 +181,7 @@ class OpenAIModel(Model):
         self,
         model_name: OpenAIModelName,
         *,
-        provider: Literal['openai', 'deepseek', 'azure', 'openrouter', 'grok', 'fireworks', 'together']
+        provider: Literal['openai', 'deepseek', 'azure', 'openrouter', 'grok', 'fireworks', 'together', 'heroku']
         | Provider[AsyncOpenAI] = 'openai',
         profile: ModelProfileSpec | None = None,
         system_prompt_role: OpenAISystemPromptRole | None = None,
@@ -321,7 +321,7 @@ class OpenAIModel(Model):
 
     def _process_response(self, response: chat.ChatCompletion) -> ModelResponse:
         """Process a non-streamed response, and prepare a message to return."""
-        timestamp = datetime.fromtimestamp(response.created, tz=timezone.utc)
+        timestamp = number_to_datetime(response.created)
         choice = response.choices[0]
         items: list[ModelResponsePart] = []
         vendor_details: dict[str, Any] | None = None
@@ -347,7 +347,9 @@ class OpenAIModel(Model):
             items.append(TextPart(choice.message.content))
         if choice.message.tool_calls is not None:
             for c in choice.message.tool_calls:
-                items.append(ToolCallPart(c.function.name, c.function.arguments, tool_call_id=c.id))
+                part = ToolCallPart(c.function.name, c.function.arguments, tool_call_id=c.id)
+                part.tool_call_id = _guard_tool_call_id(part)
+                items.append(part)
         return ModelResponse(
             items,
             usage=_map_usage(response),
@@ -369,7 +371,7 @@ class OpenAIModel(Model):
         return OpenAIStreamedResponse(
             _model_name=self._model_name,
             _response=peekable_response,
-            _timestamp=datetime.fromtimestamp(first_chunk.created, tz=timezone.utc),
+            _timestamp=number_to_datetime(first_chunk.created),
         )
 
     def _get_tools(self, model_request_parameters: ModelRequestParameters) -> list[chat.ChatCompletionToolParam]:
@@ -620,7 +622,7 @@ class OpenAIResponsesModel(Model):
 
     def _process_response(self, response: responses.Response) -> ModelResponse:
         """Process a non-streamed response, and prepare a message to return."""
-        timestamp = datetime.fromtimestamp(response.created_at, tz=timezone.utc)
+        timestamp = number_to_datetime(response.created_at)
         items: list[ModelResponsePart] = []
         items.append(TextPart(response.output_text))
         for item in response.output:
@@ -643,7 +645,7 @@ class OpenAIResponsesModel(Model):
         return OpenAIResponsesStreamedResponse(
             _model_name=self._model_name,
             _response=peekable_response,
-            _timestamp=datetime.fromtimestamp(first_chunk.response.created_at, tz=timezone.utc),
+            _timestamp=number_to_datetime(first_chunk.response.created_at),
         )
 
     @overload
