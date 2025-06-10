@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import field
 import json
+from types import CoroutineType
 from typing import TYPE_CHECKING, Any, Callable, Generic, Literal, Union, cast
 
 from opentelemetry.trace import Tracer
@@ -102,6 +103,8 @@ class GraphAgentDeps(Generic[DepsT, OutputDataT]):
     tracer: Tracer
 
     prepare_tools: ToolsPrepareFunc[DepsT] | None = None
+
+    run_callback: Callable[[RunCallbackParams], CoroutineType[Any, Any, _messages.ModelResponse]] | None = None
 
 
 class AgentNode(BaseNode[GraphAgentState, GraphAgentDeps[DepsT, Any], result.FinalResult[NodeRunEndT]]):
@@ -281,6 +284,13 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
     async def run(
         self, ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT, NodeRunEndT]]
     ) -> CallToolsNode[DepsT, NodeRunEndT]:
+        if ctx.deps.run_callback:
+            model_settings, model_request_parameters = await self._prepare_request(ctx)
+            model_request_parameters = ctx.deps.model.customize_request_parameters(model_request_parameters)
+            params = RunCallbackParams(model_name=ctx.deps.model.model_name, messages=ctx.state.message_history, model_settings=model_settings, model_request_parameters=model_request_parameters)
+            model_response = await ctx.deps.run_callback(params)
+            return self._finish_handling(ctx, model_response)
+
         if self._result is not None:
             return self._result
 
@@ -319,25 +329,28 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
 
         model_settings, model_request_parameters = await self._prepare_request(ctx)
         model_request_parameters = ctx.deps.model.customize_request_parameters(model_request_parameters)
-        print(ctx.deps.model.model_name)
-        model_response = await self.test(ctx.deps.model.model_name, model_settings, model_request_parameters, ctx)
-        # print(response)
         async with ctx.deps.model.request_stream(
             ctx.state.message_history, model_settings, model_request_parameters
         ) as streamed_response:
+            self._did_stream = True
+            ctx.state.usage.requests += 1
             yield streamed_response
-        self._did_stream = True
-        ctx.state.usage.requests += 1
-        
-        # model_response = streamed_response.get()
+            # In case the user didn't manually consume the full stream, ensure it is fully consumed here,
+            # otherwise usage won't be properly counted:
+            async for _ in streamed_response:
+                pass
+        model_response = streamed_response.get()
 
         self._finish_handling(ctx, model_response)
         assert self._result is not None  # this should be set by the previous line
 
-    async def test(self, model_name: str, model_settings: ModelSettings | None, model_request_parameters: models.ModelRequestParameters, ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT, NodeRunEndT]]):
-        from pydantic_ai.direct import model_request
-        test = Test(messages=ctx.state.message_history, model_settings=model_settings, model_request_parameters=model_request_parameters)
-        return await model_request(model_name, ctx.state.message_history, model_settings=model_settings, model_request_parameters=model_request_parameters)
+    # async def test(self, model_name: str, model_settings: ModelSettings | None, model_request_parameters: models.ModelRequestParameters, ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT, NodeRunEndT]]):
+    #     from pydantic_ai.direct import model_request
+    #     params = RunCallbackParams(model_name=model_name, messages=ctx.state.message_history, model_settings=model_settings, model_request_parameters=model_request_parameters)
+    #     if ctx.deps.run_callback:
+    #         return await ctx.deps.run_callback(params)
+    #     else:
+    #         return await model_request(model_name, ctx.state.message_history, model_settings=model_settings, model_request_parameters=model_request_parameters)
 
     async def _make_request(
         self, ctx: GraphRunContext[GraphAgentState, GraphAgentDeps[DepsT, NodeRunEndT]]
@@ -388,8 +401,9 @@ class ModelRequestNode(AgentNode[DepsT, NodeRunEndT]):
 
         return self._result
 
-class Test(BaseModel):
+class RunCallbackParams(BaseModel):
     messages: list[_messages.ModelMessage]
+    model_name: str
     model_settings: ModelSettings | None
     model_request_parameters: models.ModelRequestParameters
 

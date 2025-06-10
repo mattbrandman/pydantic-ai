@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Union
+from typing import Union, Any, Annotated
 from httpx import Timeout
 from typing_extensions import TypedDict
+import pydantic_core
+from pydantic import GetCoreSchemaHandler
 
 
 def serialize_timeout(timeout: Union[float, Timeout]) -> Union[float, dict[str, float]]:
@@ -53,6 +55,65 @@ def deserialize_timeout(value: Union[float, dict[str, float]]) -> Union[float, T
         )
     else:
         raise TypeError(f"Expected float or dict, got {type(value)}")
+
+
+class _TimeoutPydanticAnnotation:
+    """Annotation to make httpx.Timeout work with Pydantic."""
+    
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> pydantic_core.CoreSchema:
+        """Generate Pydantic core schema for httpx.Timeout.
+        
+        This allows Pydantic to handle httpx.Timeout objects in model fields
+        by providing custom serialization and deserialization logic.
+        """
+        from pydantic_core import core_schema
+        
+        def validate_timeout(value: Any) -> Union[float, Timeout]:
+            """Validate and convert input to float or Timeout."""
+            if isinstance(value, Timeout):
+                return value
+            elif isinstance(value, (int, float)):
+                return float(value)
+            elif isinstance(value, dict):
+                # Convert dict to Timeout - use deserialize_timeout which already handles this
+                return deserialize_timeout(value)
+            else:
+                raise ValueError(f"Expected float, Timeout, or dict, got {type(value)}")
+        
+        # Define the schema for the serialized form
+        timeout_dict_schema = core_schema.dict_schema(
+            keys_schema=core_schema.str_schema(),
+            values_schema=core_schema.float_schema(),
+        )
+        
+        # Union of float or dict for the serialized form
+        serialized_schema = core_schema.union_schema([
+            core_schema.float_schema(),
+            timeout_dict_schema,
+        ])
+        
+        # Use a custom validator that can handle both Python and JSON inputs
+        return core_schema.with_info_after_validator_function(
+            function=lambda v, _: validate_timeout(v),
+            schema=core_schema.union_schema([
+                core_schema.float_schema(),
+                core_schema.dict_schema(),
+                core_schema.is_instance_schema(Timeout),
+            ]),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                serialize_timeout,
+                info_arg=False,
+                return_schema=serialized_schema,
+                when_used='json'
+            )
+        )
+
+
+# Create a type alias that includes the Pydantic annotation
+TimeoutType = Annotated[Union[float, Timeout], _TimeoutPydanticAnnotation]
 
 
 class ModelSettings(TypedDict, total=False):
@@ -113,7 +174,7 @@ class ModelSettings(TypedDict, total=False):
     * Bedrock
     """
 
-    timeout: float | Timeout
+    timeout: TimeoutType
     """Override the client-level default timeout for a request, in seconds.
 
     Supported by:
