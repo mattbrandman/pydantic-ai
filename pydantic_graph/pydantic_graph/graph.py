@@ -780,7 +780,7 @@ class GraphRun(Generic[StateT, DepsT, RunEndT]):
             async with self.persistence.record_run(node_snapshot_id):
                 ctx = GraphRunContext(self.state, self.deps)
                 self._next_node = await node.run(ctx)
-
+        
         if isinstance(self._next_node, End):
             self._snapshot_id = self._next_node.get_snapshot_id()
             await self.persistence.snapshot_end(self.state, self._next_node)
