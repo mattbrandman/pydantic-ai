@@ -8,8 +8,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Union, cast, overload
 
+from openai.types.responses.response_code_interpreter_tool_call import ResultLogs
+from openai.types.responses.tool_param import CodeInterpreter
 from typing_extensions import assert_never
 
+from pydantic_ai.builtin_tools import WebSearchTool
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers import Provider, infer_provider
 
@@ -26,6 +29,9 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
+    ServerToolCallPart,
+    ServerToolCallPartDelta,
+    ServerToolReturnPart,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
@@ -58,6 +64,11 @@ try:
     from openai.types.chat.chat_completion_content_part_image_param import ImageURL
     from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
     from openai.types.chat.chat_completion_content_part_param import File, FileFile
+    from openai.types.chat.completion_create_params import (
+        WebSearchOptions,
+        WebSearchOptionsUserLocation,
+        WebSearchOptionsUserLocationApproximate,
+    )
     from openai.types.responses import ComputerToolParam, FileSearchToolParam, WebSearchToolParam
     from openai.types.responses.response_input_param import FunctionCallOutput, Message
     from openai.types.shared import ReasoningEffort
@@ -123,7 +134,7 @@ class OpenAIResponsesModelSettings(OpenAIModelSettings, total=False):
     ALL FIELDS MUST BE `openai_` PREFIXED SO YOU CAN MERGE THEM WITH OTHER MODELS.
     """
 
-    openai_builtin_tools: Sequence[FileSearchToolParam | WebSearchToolParam | ComputerToolParam]
+    openai_builtin_tools: Sequence[FileSearchToolParam | WebSearchToolParam | ComputerToolParam | CodeInterpreter]
     """The provided OpenAI built-in tools to use.
 
     See [OpenAI's built-in tools](https://platform.openai.com/docs/guides/tools?api-mode=responses) for more details.
@@ -263,6 +274,7 @@ class OpenAIModel(Model):
         model_request_parameters: ModelRequestParameters,
     ) -> chat.ChatCompletion | AsyncStream[ChatCompletionChunk]:
         tools = self._get_tools(model_request_parameters)
+        web_search_options = self._get_web_search_options(model_request_parameters)
 
         # standalone function to make it easier to override
         if not tools:
@@ -298,6 +310,7 @@ class OpenAIModel(Model):
                 logprobs=model_settings.get('openai_logprobs', NOT_GIVEN),
                 top_logprobs=model_settings.get('openai_top_logprobs', NOT_GIVEN),
                 user=model_settings.get('openai_user', NOT_GIVEN),
+                web_search_options=web_search_options or NOT_GIVEN,
                 extra_headers=extra_headers,
                 extra_body=model_settings.get('extra_body'),
             )
@@ -367,6 +380,19 @@ class OpenAIModel(Model):
             tools += [self._map_tool_definition(r) for r in model_request_parameters.output_tools]
         return tools
 
+    def _get_web_search_options(self, model_request_parameters: ModelRequestParameters) -> WebSearchOptions | None:
+        for tool in model_request_parameters.builtin_tools:
+            if isinstance(tool, WebSearchTool):
+                if tool.user_location:
+                    return WebSearchOptions(
+                        search_context_size=tool.search_context_size,
+                        user_location=WebSearchOptionsUserLocation(
+                            type='approximate',
+                            approximate=WebSearchOptionsUserLocationApproximate(**tool.user_location),
+                        ),
+                    )
+                return WebSearchOptions(search_context_size=tool.search_context_size)
+
     async def _map_messages(self, messages: list[ModelMessage]) -> list[chat.ChatCompletionMessageParam]:
         """Just maps a `pydantic_ai.Message` to a `openai.types.ChatCompletionMessageParam`."""
         openai_messages: list[chat.ChatCompletionMessageParam] = []
@@ -382,6 +408,9 @@ class OpenAIModel(Model):
                         texts.append(item.content)
                     elif isinstance(item, ToolCallPart):
                         tool_calls.append(self._map_tool_call(item))
+                    # OpenAI doesn't return server tools calls.
+                    elif isinstance(item, (ServerToolCallPart, ServerToolReturnPart)):
+                        continue
                     else:
                         assert_never(item)
                 message_param = chat.ChatCompletionAssistantMessageParam(role='assistant')
@@ -599,6 +628,8 @@ class OpenAIResponsesModel(Model):
         for item in response.output:
             if item.type == 'function_call':
                 items.append(ToolCallPart(item.name, item.arguments, tool_call_id=item.call_id))
+            if item.type == 'code_interpreter_call':
+                items.append(ServerToolCallPart(tool_name=item.type, model_name="openai", args={"code": item.code, "container_id": item.container_id, "out": item.results}, tool_call_id=item.id))
         return ModelResponse(items, usage=_map_usage(response), model_name=response.model, timestamp=timestamp)
 
     async def _process_streamed_response(
@@ -644,6 +675,7 @@ class OpenAIResponsesModel(Model):
     ) -> responses.Response | AsyncStream[responses.ResponseStreamEvent]:
         tools = self._get_tools(model_request_parameters)
         tools = list(model_settings.get('openai_builtin_tools', [])) + tools
+        tools = self._get_builtin_tools(model_request_parameters) + tools
 
         # standalone function to make it easier to override
         if not tools:
@@ -655,12 +687,12 @@ class OpenAIResponsesModel(Model):
 
         instructions, openai_messages = await self._map_messages(messages)
         reasoning = self._get_reasoning(model_settings)
-
         try:
             extra_headers = model_settings.get('extra_headers', {})
             extra_headers.setdefault('User-Agent', get_user_agent())
             return await self.client.responses.create(
                 input=openai_messages,
+                include=["code_interpreter_call.outputs"],
                 model=self._model_name,
                 instructions=instructions,
                 parallel_tool_calls=model_settings.get('parallel_tool_calls', NOT_GIVEN),
@@ -694,6 +726,20 @@ class OpenAIResponsesModel(Model):
         tools = [self._map_tool_definition(r) for r in model_request_parameters.function_tools]
         if model_request_parameters.output_tools:
             tools += [self._map_tool_definition(r) for r in model_request_parameters.output_tools]
+        return tools
+
+    def _get_builtin_tools(self, model_request_parameters: ModelRequestParameters) -> list[responses.ToolParam]:
+        tools: list[responses.ToolParam] = []
+        for tool in model_request_parameters.builtin_tools:
+            if isinstance(tool, WebSearchTool):
+                web_search_tool = responses.WebSearchToolParam(
+                    type='web_search_preview', search_context_size=tool.search_context_size
+                )
+                if tool.user_location:
+                    web_search_tool['user_location'] = responses.web_search_tool_param.UserLocation(
+                        type='approximate', **tool.user_location
+                    )
+                tools.append(web_search_tool)
         return tools
 
     def _map_tool_definition(self, f: ToolDefinition) -> responses.FunctionToolParam:
@@ -749,11 +795,15 @@ class OpenAIResponsesModel(Model):
                         openai_messages.append(responses.EasyInputMessageParam(role='assistant', content=item.content))
                     elif isinstance(item, ToolCallPart):
                         openai_messages.append(self._map_tool_call(item))
+                    # OpenAI doesn't return server tools calls.
+                    elif isinstance(item, (ServerToolCallPart)):
+                        openai_messages.append(self._map_code_interpreter_tool_call(item))
                     else:
                         assert_never(item)
             else:
                 assert_never(message)
         instructions = self._get_instructions(messages) or NOT_GIVEN
+        print(openai_messages)
         return instructions, openai_messages
 
     @staticmethod
@@ -763,6 +813,18 @@ class OpenAIResponsesModel(Model):
             call_id=_guard_tool_call_id(t=t),
             name=t.tool_name,
             type='function_call',
+        )
+    
+    @staticmethod
+    def _map_code_interpreter_tool_call(t: ServerToolCallPart) -> responses.ResponseCodeInterpreterToolCallParam:
+        args = t.args_as_dict() if t.args else {}
+        return responses.ResponseCodeInterpreterToolCallParam( # type: ignore the results parameter is wrong it uses output
+            id=t.tool_call_id,
+            code=args.get("code", ""),
+            container_id=args.get("container_id", ""),
+            status="completed",
+            type="code_interpreter_call",
+            outputs=[ResultLogs(logs="hello", type="logs").model_dump()]  # Convert to dict for JSON serialization
         )
 
     @staticmethod
@@ -923,6 +985,7 @@ class OpenAIResponsesStreamedResponse(StreamedResponse):
                 self._usage += _map_usage(chunk.response)
 
             elif isinstance(chunk, responses.ResponseOutputItemAddedEvent):
+                print(chunk)
                 if isinstance(chunk.item, responses.ResponseFunctionToolCall):
                     yield self._parts_manager.handle_tool_call_part(
                         vendor_part_id=chunk.item.id,
@@ -936,10 +999,85 @@ class OpenAIResponsesStreamedResponse(StreamedResponse):
                 pass
 
             elif isinstance(chunk, responses.ResponseTextDeltaEvent):
-                yield self._parts_manager.handle_text_delta(vendor_part_id=chunk.content_index, content=chunk.delta)
-
+                yield self._parts_manager.handle_text_delta(vendor_part_id=chunk.item_id, content=chunk.delta)
             elif isinstance(chunk, responses.ResponseTextDoneEvent):
                 pass  # there's nothing we need to do here
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallCodeDeltaEvent):
+                # Handle incremental code updates for code interpreter
+                maybe_event = self._parts_manager.handle_server_tool_call_delta(
+                    vendor_part_id=chunk.item_id,  # type: ignore
+                    tool_name="code_interpreter_call",
+                    args={"code": chunk.delta, "status": "in_progress"},
+                    tool_call_id=str(chunk.item_id),  # type: ignore
+                    model_name=self._model_name,
+                )
+                if maybe_event is not None:
+                    yield maybe_event
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallCodeDoneEvent):
+                # Handle code completion for code interpreter
+                args = {"status": "interpreting"}
+                if chunk.code:
+                    args["code"] = chunk.code
+                
+                maybe_event = self._parts_manager.handle_server_tool_call_delta(
+                    vendor_part_id=chunk.item_id,  # type: ignore
+                    tool_name=None,  # Don't update tool name
+                    args=args,
+                    tool_call_id=chunk.item_id,  # type: ignore
+                    model_name=self._model_name,
+                )
+                if maybe_event is not None:
+                    yield maybe_event
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallInProgressEvent):
+                # Handle when code interpretation starts
+
+                tool_call = chunk.code_interpreter_call
+                args = {}
+                if tool_call:
+                    args = {
+                        "status": tool_call.status,
+                    }
+                    args["code"] = tool_call.code
+                if tool_call and tool_call.container_id:
+                    args["container_id"] = tool_call.container_id
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallInterpretingEvent):
+                # Handle when code is being interpreted
+                tool_call = chunk.code_interpreter_call
+                args = {}
+                if tool_call:
+                    args = {
+                        "status": tool_call.status,
+                    }
+                if tool_call and tool_call.code:
+                    args["code"] = tool_call.code
+                if tool_call and tool_call.container_id:
+                    args["container_id"] = tool_call.container_id
+                
+                maybe_event = self._parts_manager.handle_server_tool_call_delta(
+                    vendor_part_id=chunk.item_id,  # type: ignore
+                    tool_name=None,  # Don't update tool name
+                    args=args,
+                    tool_call_id=None,
+                    model_name=self._model_name,
+                )
+                if maybe_event is not None:
+                    yield maybe_event
+
+            elif isinstance(chunk, responses.ResponseCodeInterpreterCallCompletedEvent):
+                # Handle completed code interpreter call with results
+                maybe_event = self._parts_manager.handle_server_tool_call_delta(
+                    vendor_part_id=chunk.item_id,  # type: ignore
+                    tool_name=None,  # Don't update tool name
+                    args={"status": "completed"},
+                    tool_call_id=None,
+                    model_name=self._model_name,
+                )
+                if maybe_event is not None:
+                    yield maybe_event
 
             else:  # pragma: no cover
                 warnings.warn(
