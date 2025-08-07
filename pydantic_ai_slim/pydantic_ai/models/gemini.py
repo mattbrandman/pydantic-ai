@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 import pydantic
 from httpx import USE_CLIENT_DEFAULT, Response as HTTPResponse
-from typing_extensions import NotRequired, TypedDict, assert_never
+from typing_extensions import NotRequired, TypedDict, assert_never, deprecated
 
 from pydantic_ai.providers import Provider, infer_provider
 
@@ -20,6 +20,8 @@ from .._output import OutputObjectDefinition
 from ..exceptions import UserError
 from ..messages import (
     BinaryContent,
+    BuiltinToolCallPart,
+    BuiltinToolReturnPart,
     FileUrl,
     ModelMessage,
     ModelRequest,
@@ -51,7 +53,7 @@ LatestGeminiModelNames = Literal[
     'gemini-2.0-flash',
     'gemini-2.0-flash-lite',
     'gemini-2.5-flash',
-    'gemini-2.5-flash-lite-preview-06-17',
+    'gemini-2.5-flash-lite',
     'gemini-2.5-pro',
 ]
 """Latest Gemini models."""
@@ -91,16 +93,8 @@ class GeminiModelSettings(ModelSettings, total=False):
     See the [Gemini API docs](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/add-labels-to-api-calls) for use cases and limitations.
     """
 
-    gemini_thinking_config: ThinkingConfig
-    """Thinking is on by default in both the API and AI Studio.
 
-    Being on by default doesn't mean the model will send back thoughts. For that, you need to set `include_thoughts`
-    to `True`. If you want to turn it off, set `thinking_budget` to `0`.
-
-    See more about it on <https://ai.google.dev/gemini-api/docs/thinking>.
-    """
-
-
+@deprecated('Use `GoogleModel` instead. See <https://ai.pydantic.dev/models/google/> for more details.')
 @dataclass(init=False)
 class GeminiModel(Model):
     """A model that uses Gemini via `generativelanguage.googleapis.com` API.
@@ -245,7 +239,7 @@ class GeminiModel(Model):
 
         if gemini_labels := model_settings.get('gemini_labels'):
             if self._system == 'google-vertex':
-                request_data['labels'] = gemini_labels
+                request_data['labels'] = gemini_labels  # pragma: lax no cover
 
         headers = {'Content-Type': 'application/json', 'User-Agent': get_user_agent()}
         url = f'/{self._model_name}:{"streamGenerateContent" if streamed else "generateContent"}'
@@ -375,11 +369,11 @@ class GeminiModel(Model):
                             inline_data={'data': downloaded_item['data'], 'mime_type': downloaded_item['data_type']}
                         )
                         content.append(inline_data)
-                    else:
+                    else:  # pragma: lax no cover
                         file_data = _GeminiFileDataPart(file_data={'file_uri': item.url, 'mime_type': item.media_type})
                         content.append(file_data)
                 else:
-                    assert_never(item)
+                    assert_never(item)  # pragma: lax no cover
         return content
 
     def _map_response_schema(self, o: OutputObjectDefinition) -> dict[str, Any]:
@@ -447,7 +441,11 @@ class GeminiStreamedResponse(StreamedResponse):
                 if 'text' in gemini_part:
                     # Using vendor_part_id=None means we can produce multiple text parts if their deltas are sprinkled
                     # amongst the tool call deltas
-                    yield self._parts_manager.handle_text_delta(vendor_part_id=None, content=gemini_part['text'])
+                    maybe_event = self._parts_manager.handle_text_delta(
+                        vendor_part_id=None, content=gemini_part['text']
+                    )
+                    if maybe_event is not None:  # pragma: no branch
+                        yield maybe_event
 
                 elif 'function_call' in gemini_part:
                     # Here, we assume all function_call parts are complete and don't have deltas.
@@ -614,6 +612,9 @@ def _content_model_response(m: ModelResponse) -> _GeminiContent:
         elif isinstance(item, TextPart):
             if item.content:
                 parts.append(_GeminiTextPart(text=item.content))
+        elif isinstance(item, (BuiltinToolCallPart, BuiltinToolReturnPart)):  # pragma: no cover
+            # This is currently never returned from gemini
+            pass
         else:
             assert_never(item)
     return _GeminiContent(role='model', parts=parts)

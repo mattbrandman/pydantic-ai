@@ -12,11 +12,14 @@ from httpx import Timeout
 from typing_extensions import assert_never
 
 from pydantic_ai._thinking_part import split_content_into_text_and_thinking
+from pydantic_ai.exceptions import UserError
 
 from .. import ModelHTTPError, UnexpectedModelBehavior, _utils
 from .._utils import generate_tool_call_id as _generate_tool_call_id, now_utc as _now_utc, number_to_datetime
 from ..messages import (
     BinaryContent,
+    BuiltinToolCallPart,
+    BuiltinToolReturnPart,
     DocumentUrl,
     ImageUrl,
     ModelMessage,
@@ -52,6 +55,7 @@ try:
         CompletionChunk as MistralCompletionChunk,
         Content as MistralContent,
         ContentChunk as MistralContentChunk,
+        DocumentURLChunk as MistralDocumentURLChunk,
         FunctionCall as MistralFunctionCall,
         ImageURL as MistralImageURL,
         ImageURLChunk as MistralImageURLChunk,
@@ -198,6 +202,11 @@ class MistralModel(Model):
         model_request_parameters: ModelRequestParameters,
     ) -> MistralChatCompletionResponse:
         """Make a non-streaming request to the model."""
+        # TODO(Marcelo): We need to replace the current MistralAI client to use the beta client.
+        # See https://docs.mistral.ai/agents/connectors/websearch/ to support web search.
+        if model_request_parameters.builtin_tools:
+            raise UserError('Mistral does not support built-in tools')
+
         try:
             response = await self.client.chat.complete_async(
                 model=str(self._model_name),
@@ -217,7 +226,7 @@ class MistralModel(Model):
         except SDKError as e:
             if (status_code := e.status_code) >= 400:
                 raise ModelHTTPError(status_code=status_code, model_name=self.model_name, body=e.body) from e
-            raise  # pragma: no cover
+            raise  # pragma: lax no cover
 
         assert response, 'A unexpected empty response from Mistral.'
         return response
@@ -231,6 +240,11 @@ class MistralModel(Model):
         """Create a streaming completion request to the Mistral model."""
         response: MistralEventStreamAsync[MistralCompletionEvent] | None
         mistral_messages = self._map_messages(messages)
+
+        # TODO(Marcelo): We need to replace the current MistralAI client to use the beta client.
+        # See https://docs.mistral.ai/agents/connectors/websearch/ to support web search.
+        if model_request_parameters.builtin_tools:
+            raise UserError('Mistral does not support built-in tools')
 
         if (
             model_request_parameters.output_tools
@@ -332,7 +346,7 @@ class MistralModel(Model):
 
         parts: list[ModelResponsePart] = []
         if text := _map_content(content):
-            parts.extend(split_content_into_text_and_thinking(text))
+            parts.extend(split_content_into_text_and_thinking(text, self.profile.thinking_tags))
 
         if isinstance(tool_calls, list):
             for tool_call in tool_calls:
@@ -501,6 +515,9 @@ class MistralModel(Model):
                         pass
                     elif isinstance(part, ToolCallPart):
                         tool_calls.append(self._map_tool_call(part))
+                    elif isinstance(part, (BuiltinToolCallPart, BuiltinToolReturnPart)):  # pragma: no cover
+                        # This is currently never returned from mistral
+                        pass
                     else:
                         assert_never(part)
                 mistral_messages.append(MistralAssistantMessage(content=content_chunks, tool_calls=tool_calls))
@@ -539,10 +556,19 @@ class MistralModel(Model):
                     if item.is_image:
                         image_url = MistralImageURL(url=f'data:{item.media_type};base64,{base64_encoded}')
                         content.append(MistralImageURLChunk(image_url=image_url, type='image_url'))
+                    elif item.media_type == 'application/pdf':
+                        content.append(
+                            MistralDocumentURLChunk(
+                                document_url=f'data:application/pdf;base64,{base64_encoded}', type='document_url'
+                            )
+                        )
                     else:
-                        raise RuntimeError('Only image binary content is supported for Mistral.')
+                        raise RuntimeError('BinaryContent other than image or PDF is not supported in Mistral.')
                 elif isinstance(item, DocumentUrl):
-                    raise RuntimeError('DocumentUrl is not supported in Mistral.')  # pragma: no cover
+                    if item.media_type == 'application/pdf':
+                        content.append(MistralDocumentURLChunk(document_url=item.url, type='document_url'))
+                    else:
+                        raise RuntimeError('DocumentUrl other than PDF is not supported in Mistral.')
                 elif isinstance(item, VideoUrl):
                     raise RuntimeError('VideoUrl is not supported in Mistral.')
                 else:  # pragma: no cover
@@ -591,7 +617,9 @@ class MistralStreamedResponse(StreamedResponse):
                             tool_call_id=maybe_tool_call_part.tool_call_id,
                         )
                 else:
-                    yield self._parts_manager.handle_text_delta(vendor_part_id='content', content=text)
+                    maybe_event = self._parts_manager.handle_text_delta(vendor_part_id='content', content=text)
+                    if maybe_event is not None:  # pragma: no branch
+                        yield maybe_event
 
             # Handle the explicit tool calls
             for index, dtc in enumerate(choice.delta.tool_calls or []):
