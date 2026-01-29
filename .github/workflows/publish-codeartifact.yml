@@ -1,0 +1,68 @@
+name: Publish to CodeArtifact
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "**"
+  workflow_dispatch:
+
+env:
+  UV_PYTHON: 3.12
+  UV_FROZEN: "1"
+  AWS_REGION: us-east-1
+  CODEARTIFACT_DOMAIN: diligentiq
+  CODEARTIFACT_REPOSITORY: internal
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: codeartifact
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-suffix: publish
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get CodeArtifact token
+        id: codeartifact
+        run: |
+          TOKEN=$(aws codeartifact get-authorization-token \
+            --domain ${{ env.CODEARTIFACT_DOMAIN }} \
+            --query authorizationToken \
+            --output text)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          
+          REPO_URL=$(aws codeartifact get-repository-endpoint \
+            --domain ${{ env.CODEARTIFACT_DOMAIN }} \
+            --repository ${{ env.CODEARTIFACT_REPOSITORY }} \
+            --format pypi \
+            --query repositoryEndpoint \
+            --output text)
+          echo "repo_url=$REPO_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Build packages
+        run: uv build --all-packages
+
+      - name: Publish to CodeArtifact
+        run: |
+          uv publish \
+            --publish-url "${{ steps.codeartifact.outputs.repo_url }}" \
+            --token "${{ steps.codeartifact.outputs.token }}"
