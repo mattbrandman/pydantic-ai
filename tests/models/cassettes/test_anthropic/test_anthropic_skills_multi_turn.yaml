@@ -1,0 +1,197 @@
+interactions:
+- request:
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate, br
+      connection:
+      - keep-alive
+      content-length:
+      - '357'
+      content-type:
+      - application/json
+      host:
+      - api.anthropic.com
+    method: POST
+    parsed_body:
+      container:
+        skills:
+        - skill_id: pdf
+          type: anthropic
+      max_tokens: 4096
+      messages:
+      - content:
+        - text: Write a tiny hello.txt file using bash.
+          type: text
+        role: user
+      model: claude-sonnet-4-5
+      stream: false
+      tool_choice:
+        type: auto
+      tools:
+      - name: code_execution
+        type: code_execution_20250825
+    uri: https://api.anthropic.com/v1/messages?beta=true
+  response:
+    headers:
+      connection:
+      - keep-alive
+      content-length:
+      - '1399'
+      content-security-policy:
+      - default-src 'none'; frame-ancestors 'none'
+      content-type:
+      - application/json
+      strict-transport-security:
+      - max-age=31536000; includeSubDomains; preload
+      transfer-encoding:
+      - chunked
+    parsed_body:
+      container:
+        expires_at: '2026-02-05T20:40:20.111185Z'
+        id: container_011CXqVNNnZyNRinMsgqYyyA
+        skills:
+        - skill_id: pdf
+          type: anthropic
+          version: '20260203'
+      content:
+      - text: I'll create a tiny hello.txt file using bash.
+        type: text
+      - id: srvtoolu_01Nw8oAAJHA2jsCjfCmrro4B
+        input:
+          command: echo "Hello, World!" > /tmp/hello.txt && cat /tmp/hello.txt
+        name: bash_code_execution
+        type: server_tool_use
+      - content:
+          content: []
+          return_code: 0
+          stderr: ''
+          stdout: |
+            Hello, World!
+          type: bash_code_execution_result
+        tool_use_id: srvtoolu_01Nw8oAAJHA2jsCjfCmrro4B
+        type: bash_code_execution_tool_result
+      - text: Done! I've created a tiny `hello.txt` file in `/tmp/` containing "Hello, World!" using bash. The file has been
+          created and verified - as you can see from the output, it contains the text "Hello, World!".
+        type: text
+      id: msg_01KDSMhiy6tZNjGfwVRVBsMo
+      model: claude-sonnet-4-5-20250929
+      role: assistant
+      stop_reason: end_turn
+      stop_sequence: null
+      type: message
+      usage:
+        cache_creation:
+          ephemeral_1h_input_tokens: 0
+          ephemeral_5m_input_tokens: 0
+        cache_creation_input_tokens: 0
+        cache_read_input_tokens: 0
+        inference_geo: not_available
+        input_tokens: 5539
+        output_tokens: 144
+        server_tool_use:
+          web_search_requests: 0
+        service_tier: standard
+    status:
+      code: 200
+      message: OK
+- request:
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate, br
+      connection:
+      - keep-alive
+      content-length:
+      - '1268'
+      content-type:
+      - application/json
+      host:
+      - api.anthropic.com
+    method: POST
+    parsed_body:
+      container:
+        id: container_011CXqVNNnZyNRinMsgqYyyA
+        skills:
+        - skill_id: pdf
+          type: anthropic
+      max_tokens: 4096
+      messages:
+      - content:
+        - text: Write a tiny hello.txt file using bash.
+          type: text
+        role: user
+      - content:
+        - text: I'll create a tiny hello.txt file using bash.
+          type: text
+        - id: srvtoolu_01Nw8oAAJHA2jsCjfCmrro4B
+          input:
+            command: echo "Hello, World!" > /tmp/hello.txt && cat /tmp/hello.txt
+          name: bash_code_execution
+          type: server_tool_use
+        - content:
+            content: []
+            return_code: 0
+            stderr: ''
+            stdout: |
+              Hello, World!
+            type: bash_code_execution_result
+          tool_use_id: srvtoolu_01Nw8oAAJHA2jsCjfCmrro4B
+          type: bash_code_execution_tool_result
+        - text: Done! I've created a tiny `hello.txt` file in `/tmp/` containing "Hello, World!" using bash. The file has
+            been created and verified - as you can see from the output, it contains the text "Hello, World!".
+          type: text
+        role: assistant
+      - content:
+        - text: What did you just do? Reply in one sentence.
+          type: text
+        role: user
+      model: claude-sonnet-4-5
+      stream: false
+      tool_choice:
+        type: auto
+      tools:
+      - name: code_execution
+        type: code_execution_20250825
+    uri: https://api.anthropic.com/v1/messages?beta=true
+  response:
+    headers:
+      connection:
+      - keep-alive
+      content-length:
+      - '639'
+      content-security-policy:
+      - default-src 'none'; frame-ancestors 'none'
+      content-type:
+      - application/json
+      strict-transport-security:
+      - max-age=31536000; includeSubDomains; preload
+      transfer-encoding:
+      - chunked
+    parsed_body:
+      content:
+      - text: I created a text file named hello.txt containing "Hello, World!" using the bash echo command and then displayed
+          its contents to verify it was created successfully.
+        type: text
+      id: msg_01Fp2SJ373pTTjbVVukVhDzC
+      model: claude-sonnet-4-5-20250929
+      role: assistant
+      stop_reason: end_turn
+      stop_sequence: null
+      type: message
+      usage:
+        cache_creation:
+          ephemeral_1h_input_tokens: 0
+          ephemeral_5m_input_tokens: 0
+        cache_creation_input_tokens: 0
+        cache_read_input_tokens: 0
+        inference_geo: not_available
+        input_tokens: 2894
+        output_tokens: 35
+        service_tier: standard
+    status:
+      code: 200
+      message: OK
+version: 1
