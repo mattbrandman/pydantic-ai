@@ -954,7 +954,7 @@ class GeminiStreamedResponse(StreamedResponse):
         assert self._code_execution_tool_call_id is not None
         return _map_code_execution_result(code_execution_result, self.provider_name, self._code_execution_tool_call_id)
 
-    def _handle_executable_code_streaming(self, executable_code: ExecutableCode) -> ModelResponsePart:
+    def _handle_executable_code_streaming(self, executable_code: ExecutableCode) -> BuiltinToolCallPart:
         """Handle executable code for streaming responses.
 
         Returns a BuiltinToolCallPart for file search or code execution.
@@ -1020,9 +1020,9 @@ def _content_model_response(m: ModelResponse, provider_name: str) -> ContentDict
     for item in m.parts:
         part: PartDict = {}
         if (
-            item.provider_details
-            and (thought_signature := item.provider_details.get('thought_signature'))
-            and (m.provider_name == provider_name or item.provider_name == provider_name)
+            (item_provider_details := getattr(item, 'provider_details', None))
+            and (thought_signature := item_provider_details.get('thought_signature'))
+            and (m.provider_name == provider_name or getattr(item, 'provider_name', None) == provider_name)
         ):
             part['thought_signature'] = base64.b64decode(thought_signature)
         elif thinking_part_signature:
@@ -1070,6 +1070,8 @@ def _content_model_response(m: ModelResponse, provider_name: str) -> ContentDict
             content = item.content
             inline_data_dict: BlobDict = {'data': content.data, 'mime_type': content.media_type}
             part['inline_data'] = inline_data_dict
+        elif isinstance(item, UploadedFile):
+            pass
         else:
             assert_never(item)
 
