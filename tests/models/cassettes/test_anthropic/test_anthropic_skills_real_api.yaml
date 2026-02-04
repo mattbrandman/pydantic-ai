@@ -1,0 +1,579 @@
+interactions:
+- request:
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate, br
+      connection:
+      - keep-alive
+      content-length:
+      - '422'
+      content-type:
+      - application/json
+      host:
+      - api.anthropic.com
+    method: POST
+    parsed_body:
+      container:
+        skills:
+        - skill_id: pdf
+          type: anthropic
+      max_tokens: 4096
+      messages:
+      - content:
+        - text: Create a random one page PDF file use skills.
+          type: text
+        role: user
+      model: claude-sonnet-4-5
+      stream: false
+      system: Create a random one page PDF file use skills.
+      tool_choice:
+        type: auto
+      tools:
+      - name: code_execution
+        type: code_execution_20250825
+    uri: https://api.anthropic.com/v1/messages?beta=true
+  response:
+    headers:
+      connection:
+      - keep-alive
+      content-length:
+      - '16996'
+      content-security-policy:
+      - default-src 'none'; frame-ancestors 'none'
+      content-type:
+      - application/json
+      strict-transport-security:
+      - max-age=31536000; includeSubDomains; preload
+      transfer-encoding:
+      - chunked
+    parsed_body:
+      container:
+        expires_at: '2026-02-05T02:11:40.201762Z'
+        id: container_011CXp2nd7Jv1JzfNz2HMh2W
+        skills:
+        - skill_id: pdf
+          type: anthropic
+          version: '20260203'
+      content:
+      - text: I'll help you create a random one-page PDF file using the skills. Let me first read the PDF skill file to understand
+          the proper approach.
+        type: text
+      - id: srvtoolu_01BF4SgSSSiEtioUw7mYiBBW
+        input:
+          command: view
+          path: /skills/pdf/SKILL.md
+        name: text_editor_code_execution
+        type: server_tool_use
+      - content:
+          content: |
+            ---
+            name: pdf
+            description: Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms, encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs to make them searchable. If the user mentions a .pdf file or asks to produce one, use this skill.
+            license: Proprietary. LICENSE.txt has complete terms
+            ---
+
+            # PDF Processing Guide
+
+            ## Overview
+
+            This guide covers essential PDF processing operations using Python libraries and command-line tools. For advanced features, JavaScript libraries, and detailed examples, see REFERENCE.md. If you need to fill out a PDF form, read FORMS.md and follow its instructions.
+
+            ## Quick Start
+
+            ```python
+            from pypdf import PdfReader, PdfWriter
+
+            # Read a PDF
+            reader = PdfReader("document.pdf")
+            print(f"Pages: {len(reader.pages)}")
+
+            # Extract text
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text()
+            ```
+
+            ## Python Libraries
+
+            ### pypdf - Basic Operations
+
+            #### Merge PDFs
+            ```python
+            from pypdf import PdfWriter, PdfReader
+
+            writer = PdfWriter()
+            for pdf_file in ["doc1.pdf", "doc2.pdf", "doc3.pdf"]:
+                reader = PdfReader(pdf_file)
+                for page in reader.pages:
+                    writer.add_page(page)
+
+            with open("merged.pdf", "wb") as output:
+                writer.write(output)
+            ```
+
+            #### Split PDF
+            ```python
+            reader = PdfReader("input.pdf")
+            for i, page in enumerate(reader.pages):
+                writer = PdfWriter()
+                writer.add_page(page)
+                with open(f"page_{i+1}.pdf", "wb") as output:
+                    writer.write(output)
+            ```
+
+            #### Extract Metadata
+            ```python
+            reader = PdfReader("document.pdf")
+            meta = reader.metadata
+            print(f"Title: {meta.title}")
+            print(f"Author: {meta.author}")
+            print(f"Subject: {meta.subject}")
+            print(f"Creator: {meta.creator}")
+            ```
+
+            #### Rotate Pages
+            ```python
+            reader = PdfReader("input.pdf")
+            writer = PdfWriter()
+
+            page = reader.pages[0]
+            page.rotate(90)  # Rotate 90 degrees clockwise
+            writer.add_page(page)
+
+            with open("rotated.pdf", "wb") as output:
+                writer.write(output)
+            ```
+
+            ### pdfplumber - Text and Table Extraction
+
+            #### Extract Text with Layout
+            ```python
+            import pdfplumber
+
+            with pdfplumber.open("document.pdf") as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text()
+                    print(text)
+            ```
+
+            #### Extract Tables
+            ```python
+            with pdfplumber.open("document.pdf") as pdf:
+                for i, page in enumerate(pdf.pages):
+                    tables = page.extract_tables()
+                    for j, table in enumerate(tables):
+                        print(f"Table {j+1} on page {i+1}:")
+                        for row in table:
+                            print(row)
+            ```
+
+            #### Advanced Table Extraction
+            ```python
+            import pandas as pd
+
+            with pdfplumber.open("document.pdf") as pdf:
+                all_tables = []
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    for table in tables:
+                        if table:  # Check if table is not empty
+                            df = pd.DataFrame(table[1:], columns=table[0])
+                            all_tables.append(df)
+
+            # Combine all tables
+            if all_tables:
+                combined_df = pd.concat(all_tables, ignore_index=True)
+                combined_df.to_excel("extracted_tables.xlsx", index=False)
+            ```
+
+            ### reportlab - Create PDFs
+
+            #### Basic PDF Creation
+            ```python
+            from reportlab.lib.pagesizes import letter
+            from reportlab.pdfgen import canvas
+
+            c = canvas.Canvas("hello.pdf", pagesize=letter)
+            width, height = letter
+
+            # Add text
+            c.drawString(100, height - 100, "Hello World!")
+            c.drawString(100, height - 120, "This is a PDF created with reportlab")
+
+            # Add a line
+            c.line(100, height - 140, 400, height - 140)
+
+            # Save
+            c.save()
+            ```
+
+            #### Create PDF with Multiple Pages
+            ```python
+            from reportlab.lib.pagesizes import letter
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+            from reportlab.lib.styles import getSampleStyleSheet
+
+            doc = SimpleDocTemplate("report.pdf", pagesize=letter)
+            styles = getSampleStyleSheet()
+            story = []
+
+            # Add content
+            title = Paragraph("Report Title", styles['Title'])
+            story.append(title)
+            story.append(Spacer(1, 12))
+
+            body = Paragraph("This is the body of the report. " * 20, styles['Normal'])
+            story.append(body)
+            story.append(PageBreak())
+
+            # Page 2
+            story.append(Paragraph("Page 2", styles['Heading1']))
+            story.append(Paragraph("Content for page 2", styles['Normal']))
+
+            # Build PDF
+            doc.build(story)
+            ```
+
+            #### Subscripts and Superscripts
+
+            **IMPORTANT**: Never use Unicode subscript/superscript characters (0123456789, 0123456789) in ReportLab PDFs. The built-in fonts do not include these glyphs, causing them to render as solid black boxes.
+
+            Instead, use ReportLab's XML markup tags in Paragraph objects:
+            ```python
+            from reportlab.platypus import Paragraph
+            from reportlab.lib.styles import getSampleStyleSheet
+
+            styles = getSampleStyleSheet()
+
+            # Subscripts: use <sub> tag
+            chemical = Paragraph("H<sub>2</sub>O", styles['Normal'])
+
+            # Superscripts: use <super> tag
+            squared = Paragraph("x<super>2</super> + y<super>2</super>", styles['Normal'])
+            ```
+
+            For canvas-drawn text (not Paragraph objects), manually adjust font the size and position rather than using Unicode subscripts/superscripts.
+
+            ## Command-Line Tools
+
+            ### pdftotext (poppler-utils)
+            ```bash
+            # Extract text
+            pdftotext input.pdf output.txt
+
+            # Extract text preserving layout
+            pdftotext -layout input.pdf output.txt
+
+            # Extract specific pages
+            pdftotext -f 1 -l 5 input.pdf output.txt  # Pages 1-5
+            ```
+
+            ### qpdf
+            ```bash
+            # Merge PDFs
+            qpdf --empty --pages file1.pdf file2.pdf -- merged.pdf
+
+            # Split pages
+            qpdf input.pdf --pages . 1-5 -- pages1-5.pdf
+            qpdf input.pdf --pages . 6-10 -- pages6-10.pdf
+
+            # Rotate pages
+            qpdf input.pdf output.pdf --rotate=+90:1  # Rotate page 1 by 90 degrees
+
+            # Remove password
+            qpdf --password=mypassword --decrypt encrypted.pdf decrypted.pdf
+            ```
+
+            ### pdftk (if available)
+            ```bash
+            # Merge
+            pdftk file1.pdf file2.pdf cat output merged.pdf
+
+            # Split
+            pdftk input.pdf burst
+
+            # Rotate
+            pdftk input.pdf rotate 1east output rotated.pdf
+            ```
+
+            ## Common Tasks
+
+            ### Extract Text from Scanned PDFs
+            ```python
+            # Requires: pip install pytesseract pdf2image
+            import pytesseract
+            from pdf2image import convert_from_path
+
+            # Convert PDF to images
+            images = convert_from_path('scanned.pdf')
+
+            # OCR each page
+            text = ""
+            for i, image in enumerate(images):
+                text += f"Page {i+1}:\n"
+                text += pytesseract.image_to_string(image)
+                text += "\n\n"
+
+            print(text)
+            ```
+
+            ### Add Watermark
+            ```python
+            from pypdf import PdfReader, PdfWriter
+
+            # Create watermark (or load existing)
+            watermark = PdfReader("watermark.pdf").pages[0]
+
+            # Apply to all pages
+            reader = PdfReader("document.pdf")
+            writer = PdfWriter()
+
+            for page in reader.pages:
+                page.merge_page(watermark)
+                writer.add_page(page)
+
+            with open("watermarked.pdf", "wb") as output:
+                writer.write(output)
+            ```
+
+            ### Extract Images
+            ```bash
+            # Using pdfimages (poppler-utils)
+            pdfimages -j input.pdf output_prefix
+
+            # This extracts all images as output_prefix-000.jpg, output_prefix-001.jpg, etc.
+            ```
+
+            ### Password Protection
+            ```python
+            from pypdf import PdfReader, PdfWriter
+
+            reader = PdfReader("input.pdf")
+            writer = PdfWriter()
+
+            for page in reader.pages:
+                writer.add_page(page)
+
+            # Add password
+            writer.encrypt("userpassword", "ownerpassword")
+
+            with open("encrypted.pdf", "wb") as output:
+                writer.write(output)
+            ```
+
+            ## Quick Reference
+
+            | Task | Best Tool | Command/Code |
+            |------|-----------|--------------|
+            | Merge PDFs | pypdf | `writer.add_page(page)` |
+            | Split PDFs | pypdf | One page per file |
+            | Extract text | pdfplumber | `page.extract_text()` |
+            | Extract tables | pdfplumber | `page.extract_tables()` |
+            | Create PDFs | reportlab | Canvas or Platypus |
+            | Command line merge | qpdf | `qpdf --empty --pages ...` |
+            | OCR scanned PDFs | pytesseract | Convert to image first |
+            | Fill PDF forms | pdf-lib or pypdf (see FORMS.md) | See FORMS.md |
+
+            ## Next Steps
+
+            - For advanced pypdfium2 usage, see REFERENCE.md
+            - For JavaScript libraries (pdf-lib), see REFERENCE.md
+            - If you need to fill out a PDF form, follow the instructions in FORMS.md
+            - For troubleshooting guides, see REFERENCE.md
+          file_type: text
+          num_lines: 315
+          start_line: 1
+          total_lines: 315
+          type: text_editor_code_execution_view_result
+        tool_use_id: srvtoolu_01BF4SgSSSiEtioUw7mYiBBW
+        type: text_editor_code_execution_tool_result
+      - text: 'Now I''ll create a random one-page PDF file using the reportlab library as shown in the skill guide:'
+        type: text
+      - id: srvtoolu_01MUsxB1hnroecZsYwK1c5Dw
+        input:
+          command: create
+          file_text: "#!/usr/bin/env python3\n\"\"\"\nCreate a random one-page PDF file with various content\n\"\"\"\n\nimport
+            os\nimport random\nfrom reportlab.lib.pagesizes import letter\nfrom reportlab.lib.units import inch\nfrom reportlab.pdfgen
+            import canvas\nfrom reportlab.lib.colors import HexColor\n\n# Random content generators\ndef random_color():\n
+            \   \"\"\"Generate a random hex color\"\"\"\n    return HexColor('#%02x%02x%02x' % (random.randint(0, 255), \n
+            \                                       random.randint(0, 255), \n                                        random.randint(0,
+            255)))\n\ndef random_quote():\n    \"\"\"Get a random inspiring quote\"\"\"\n    quotes = [\n        \"The only
+            way to do great work is to love what you do. - Steve Jobs\",\n        \"Innovation distinguishes between a leader
+            and a follower. - Steve Jobs\",\n        \"The future belongs to those who believe in the beauty of their dreams.
+            - Eleanor Roosevelt\",\n        \"Success is not final, failure is not fatal: it is the courage to continue that
+            counts. - Winston Churchill\",\n        \"Believe you can and you're halfway there. - Theodore Roosevelt\",\n
+            \       \"The best time to plant a tree was 20 years ago. The second best time is now. - Chinese Proverb\",\n
+            \       \"Your time is limited, don't waste it living someone else's life. - Steve Jobs\",\n        \"The only
+            impossible journey is the one you never begin. - Tony Robbins\"\n    ]\n    return random.choice(quotes)\n\n#
+            Set output path\noutput_path = os.path.join(os.environ['OUTPUT_DIR'], 'random_document.pdf')\n\n# Create canvas\nc
+            = canvas.Canvas(output_path, pagesize=letter)\nwidth, height = letter\n\n# Set random background color (light)\nbg_color
+            = HexColor('#%02x%02x%02x' % (random.randint(230, 255), \n                                        random.randint(230,
+            255), \n                                        random.randint(230, 255)))\nc.setFillColor(bg_color)\nc.rect(0,
+            0, width, height, fill=True, stroke=False)\n\n# Title with random color\ntitle_color = random_color()\nc.setFillColor(title_color)\nc.setFont(\"Helvetica-Bold\",
+            28)\ntitle = \"Random Generated Document\"\nc.drawCentredString(width / 2, height - 1*inch, title)\n\n# Subtitle\nc.setFont(\"Helvetica-Oblique\",
+            14)\nc.setFillColor(HexColor('#333333'))\nsubtitle = f\"Created on: {random.randint(1, 12)}/{random.randint(1,
+            28)}/2024\"\nc.drawCentredString(width / 2, height - 1.5*inch, subtitle)\n\n# Horizontal line\nline_color = random_color()\nc.setStrokeColor(line_color)\nc.setLineWidth(3)\nc.line(1*inch,
+            height - 2*inch, width - 1*inch, height - 2*inch)\n\n# Random quote in the middle\nquote = random_quote()\nc.setFillColor(HexColor('#000000'))\nc.setFont(\"Helvetica\",
+            12)\n\n# Word wrap the quote\nwords = quote.split()\nlines = []\ncurrent_line = \"\"\nfor word in words:\n    test_line
+            = current_line + \" \" + word if current_line else word\n    if c.stringWidth(test_line, \"Helvetica\", 12) <
+            width - 2.5*inch:\n        current_line = test_line\n    else:\n        lines.append(current_line)\n        current_line
+            = word\nif current_line:\n    lines.append(current_line)\n\ny_position = height - 3*inch\nfor line in lines:\n
+            \   c.drawCentredString(width / 2, y_position, line)\n    y_position -= 18\n\n# Draw some random shapes\nnum_shapes
+            = random.randint(3, 7)\ny_position = height - 5*inch\n\nc.setFont(\"Helvetica-Bold\", 14)\nc.setFillColor(HexColor('#000000'))\nc.drawString(1*inch,
+            y_position, \"Random Geometric Elements:\")\n\ny_position -= 0.5*inch\n\nfor i in range(num_shapes):\n    shape_color
+            = random_color()\n    c.setFillColor(shape_color)\n    c.setStrokeColor(shape_color)\n    \n    shape_type = random.choice(['circle',
+            'rectangle', 'line'])\n    x_pos = 1*inch + (i % 3) * 2*inch\n    y_pos = y_position - (i // 3) * 1.2*inch\n    \n
+            \   if shape_type == 'circle':\n        radius = random.randint(10, 30)\n        c.circle(x_pos, y_pos, radius,
+            fill=True)\n    elif shape_type == 'rectangle':\n        w = random.randint(30, 60)\n        h = random.randint(20,
+            50)\n        c.rect(x_pos, y_pos, w, h, fill=True)\n    else:\n        c.setLineWidth(random.randint(2, 5))\n
+            \       c.line(x_pos, y_pos, x_pos + random.randint(40, 80), y_pos)\n\n# Add some random data\nc.setFillColor(HexColor('#000000'))\nc.setFont(\"Helvetica-Bold\",
+            12)\ndata_y = 2.5*inch\nc.drawString(1*inch, data_y, \"Random Statistics:\")\n\nc.setFont(\"Helvetica\", 10)\nstats
+            = [\n    f\"Random Number: {random.randint(1000, 9999)}\",\n    f\"Percentage: {random.randint(1, 100)}%\",\n
+            \   f\"Temperature: {random.randint(60, 85)}°F\",\n    f\"Score: {random.randint(0, 100)}/100\"\n]\n\ndata_y -=
+            20\nfor stat in stats:\n    c.drawString(1.2*inch, data_y, f\"• {stat}\")\n    data_y -= 15\n\n# Footer\nc.setFont(\"Helvetica-Oblique\",
+            9)\nc.setFillColor(HexColor('#666666'))\nfooter_text = f\"Document ID: {random.randint(10000, 99999)} | Page 1
+            of 1\"\nc.drawCentredString(width / 2, 0.5*inch, footer_text)\n\n# Save the PDF\nc.save()\n\nprint(f\"Random PDF
+            created successfully at: {output_path}\")\nprint(f\"Quote used: {quote}\")\n"
+          path: /tmp/create_random_pdf.py
+        name: text_editor_code_execution
+        type: server_tool_use
+      - content:
+          is_file_update: false
+          type: text_editor_code_execution_create_result
+        tool_use_id: srvtoolu_01MUsxB1hnroecZsYwK1c5Dw
+        type: text_editor_code_execution_tool_result
+      - id: srvtoolu_01Wh5wQGx6ba3aSTjiPnQ5em
+        input:
+          command: cd /tmp && python create_random_pdf.py
+        name: bash_code_execution
+        type: server_tool_use
+      - content:
+          content:
+          - file_id: file_011CXp2qA4Tjjw5VYrw2yd9w
+            type: bash_code_execution_output
+          return_code: 0
+          stderr: ''
+          stdout: |
+            Random PDF created successfully at: /files/output/7bdbc6c2ed3cc16b/random_document.pdf
+            Quote used: The only way to do great work is to love what you do. - Steve Jobs
+          type: bash_code_execution_result
+        tool_use_id: srvtoolu_01Wh5wQGx6ba3aSTjiPnQ5em
+        type: bash_code_execution_tool_result
+      - text: |-
+          Perfect! I've successfully created a random one-page PDF file using the skills. The PDF includes:
+
+          ✅ **Random Title** - "Random Generated Document" with a random color
+          ✅ **Random Date** - Generated date in the subtitle
+          ✅ **Random Quote** - An inspiring quote selected randomly from a collection
+          ✅ **Random Geometric Shapes** - Between 3-7 randomly colored circles, rectangles, and lines
+          ✅ **Random Statistics** - Including random numbers, percentages, temperature, and scores
+          ✅ **Random Colors** - Used throughout the document for various elements
+          ✅ **Light Random Background** - Subtle colored background
+          ✅ **Professional Layout** - With header, dividing line, and footer
+
+          The PDF has been created and exported as **random_document.pdf**. Each time you run this, it will generate a different document with:
+          - Different colors
+          - Different quote
+          - Different shapes and positions
+          - Different random data values
+
+          The file was created using the reportlab library as recommended in the PDF skill guide!
+        type: text
+      id: msg_01HZUimKPbThQqwbUFq7NHoT
+      model: claude-sonnet-4-5-20250929
+      role: assistant
+      stop_reason: end_turn
+      stop_sequence: null
+      type: message
+      usage:
+        cache_creation:
+          ephemeral_1h_input_tokens: 0
+          ephemeral_5m_input_tokens: 0
+        cache_creation_input_tokens: 0
+        cache_read_input_tokens: 0
+        input_tokens: 22640
+        output_tokens: 2219
+        server_tool_use:
+          web_search_requests: 0
+        service_tier: standard
+    status:
+      code: 200
+      message: OK
+- request:
+    body: ''
+    headers:
+      accept:
+      - application/binary
+      accept-encoding:
+      - gzip, deflate, br
+      connection:
+      - keep-alive
+      host:
+      - api.anthropic.com
+    method: GET
+    uri: https://api.anthropic.com/v1/files/file_011CXp2qA4Tjjw5VYrw2yd9w/content?beta=true
+  response:
+    body:
+      string: !!binary |
+        JVBERi0xLjQKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgaHR0cDovL3d3
+        dy5yZXBvcnRsYWIuY29tCjEgMCBvYmoKPDwKL0YxIDIgMCBSIC9GMiAzIDAgUiAvRjMgNCAwIFIK
+        Pj4KZW5kb2JqCjIgMCBvYmoKPDwKL0Jhc2VGb250IC9IZWx2ZXRpY2EgL0VuY29kaW5nIC9XaW5B
+        bnNpRW5jb2RpbmcgL05hbWUgL0YxIC9TdWJ0eXBlIC9UeXBlMSAvVHlwZSAvRm9udAo+PgplbmRv
+        YmoKMyAwIG9iago8PAovQmFzZUZvbnQgL0hlbHZldGljYS1Cb2xkIC9FbmNvZGluZyAvV2luQW5z
+        aUVuY29kaW5nIC9OYW1lIC9GMiAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2Jq
+        CjQgMCBvYmoKPDwKL0Jhc2VGb250IC9IZWx2ZXRpY2EtT2JsaXF1ZSAvRW5jb2RpbmcgL1dpbkFu
+        c2lFbmNvZGluZyAvTmFtZSAvRjMgL1N1YnR5cGUgL1R5cGUxIC9UeXBlIC9Gb250Cj4+CmVuZG9i
+        ago1IDAgb2JqCjw8Ci9Db250ZW50cyA5IDAgUiAvTWVkaWFCb3ggWyAwIDAgNjEyIDc5MiBdIC9Q
+        YXJlbnQgOCAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1Rl
+        eHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAK
+        ICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKNiAwIG9iago8PAovUGFnZU1vZGUgL1VzZU5vbmUgL1Bh
+        Z2VzIDggMCBSIC9UeXBlIC9DYXRhbG9nCj4+CmVuZG9iago3IDAgb2JqCjw8Ci9BdXRob3IgKGFu
+        b255bW91cykgL0NyZWF0aW9uRGF0ZSAoRDoyMDI2MDIwNTAxMTEzOCswMCcwMCcpIC9DcmVhdG9y
+        IChSZXBvcnRMYWIgUERGIExpYnJhcnkgLSB3d3cucmVwb3J0bGFiLmNvbSkgL0tleXdvcmRzICgp
+        IC9Nb2REYXRlIChEOjIwMjYwMjA1MDExMTM4KzAwJzAwJykgL1Byb2R1Y2VyIChSZXBvcnRMYWIg
+        UERGIExpYnJhcnkgLSB3d3cucmVwb3J0bGFiLmNvbSkgCiAgL1N1YmplY3QgKHVuc3BlY2lmaWVk
+        KSAvVGl0bGUgKHVudGl0bGVkKSAvVHJhcHBlZCAvRmFsc2UKPj4KZW5kb2JqCjggMCBvYmoKPDwK
+        L0NvdW50IDEgL0tpZHMgWyA1IDAgUiBdIC9UeXBlIC9QYWdlcwo+PgplbmRvYmoKOSAwIG9iago8
+        PAovRmlsdGVyIFsgL0FTQ0lJODVEZWNvZGUgL0ZsYXRlRGVjb2RlIF0gL0xlbmd0aCA4MzEKPj4K
+        c3RyZWFtCkdhczFdOWxKYz8lKSlPPm4xbkIlMExfX01XI2lSIkApRlo0Tks6Y0tZMWRLR2oyI15O
+        J1xKSGctLzQ6KlkiXT0nUUhAMkFCTW8wX3MmSGQ3MjhFPyRaVihIL1RtUWlPS1JyXFU+YTBwSig1
+        I0ksSmtlUD0tOmlnYFl1cDBrYHQ6Tik3WUhQXDZKMTRsLVAwPShCMDZJXWFJdUR0Mzw5MVo4dGBT
+        MjZOWitHIXVFOENZaXJsdEtYLT5uMmlJP1c7bztVP2EqLGtMSFQ1ckREJnE2YS1SYUkyR3F0JyEv
+        aT5IMV1VYl5YMmFXI2VXUSxeT1NeOWlZLEVsJlJCaydWTWV1KGJob0o7X0YtTGNWL2RbdTEwMC0o
+        LSFPdWdEJzxNPGpBMj1MbXMmQ2IqSWJjO0smJF5uPlxVQW4wQldGdVxhLWomXj9BbExyX0IhWmY8
+        aDtUPGAjNDxGVDlJKyZ1WyhnIlo4VUlOIzpQQE87RGEkKmFwKDZeMmskQCZtRHBALCNBVGRLYkZm
+        IzozLC04XnI0PikiW2EwJl1LRTNZOyJtW01bPkMlQTFhZFdpa2tAQjVbZUJHOVo4WUlKPzUsJ19K
+        TjYoSmNcIyFwWmYrSWFyXV5uKGslV2ohYUo1YmUwaS1MUmJPVy9Acik5TzdibmhWKVYkQT8nKyJT
+        MCNTZDRjQzRqV0diX0lFZ0lfPEtNN2FJOTsmQkpORTk2akVcJGNrZGBQKmlgTjBfbT07VmJRUS02
+        VGM6aG9EP2hmI1FnJWZ0cGctXi5VZ3EhQTBqZiw1cj1gWW1iLEcrdTJPKSMzYHRGRD1lcyFvYTdD
+        JWNiUE43ZV9tJDhKNVxhMVBGX0ppNmteYGRXJU0zXURdcy09Ki06Nm81O3ItMnIxYyNDN2ZLJkE7
+        N3RRNWlgYmdcSzokOkduMSM2Tyk5Ol1nSmRVKW9KLDlEVzNNLSlsZSM3bl5sLTdTRilGNFQoVCZQ
+        dGI/NGQ+QkAiJEozJSZYbGFpakVmZUtqN2hDL1BiVlI/SS42TSYhPTZHclclPFtJWCJdXmBqcnRy
+        NzFjMTBWM2dhb3BjPjZsUXVJX0NSMnJCJUhDMVI1ayw/b28yKyF+PmVuZHN0cmVhbQplbmRvYmoK
+        eHJlZgowIDEwCjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA3MyAwMDAwMCBuIAowMDAwMDAw
+        MTI0IDAwMDAwIG4gCjAwMDAwMDAyMzEgMDAwMDAgbiAKMDAwMDAwMDM0MyAwMDAwMCBuIAowMDAw
+        MDAwNDU4IDAwMDAwIG4gCjAwMDAwMDA2NTEgMDAwMDAgbiAKMDAwMDAwMDcxOSAwMDAwMCBuIAow
+        MDAwMDAxMDE1IDAwMDAwIG4gCjAwMDAwMDEwNzQgMDAwMDAgbiAKdHJhaWxlcgo8PAovSUQgCls8
+        YjAzNzNmMjlmNDQxZmFlMzMwNzhlNTI2N2M1NzY1YzA+PGIwMzczZjI5ZjQ0MWZhZTMzMDc4ZTUy
+        NjdjNTc2NWMwPl0KJSBSZXBvcnRMYWIgZ2VuZXJhdGVkIFBERiBkb2N1bWVudCAtLSBkaWdlc3Qg
+        KGh0dHA6Ly93d3cucmVwb3J0bGFiLmNvbSkKCi9JbmZvIDcgMCBSCi9Sb290IDYgMCBSCi9TaXpl
+        IDEwCj4+CnN0YXJ0eHJlZgoxOTk1CiUlRU9GCg==
+    headers:
+      connection:
+      - keep-alive
+      content-disposition:
+      - attachment; filename*=utf-8''random_document.pdf
+      content-security-policy:
+      - default-src 'none'; frame-ancestors 'none'
+      content-type:
+      - application/pdf
+      strict-transport-security:
+      - max-age=31536000; includeSubDomains; preload
+      transfer-encoding:
+      - chunked
+    status:
+      code: 200
+      message: OK
+version: 1
