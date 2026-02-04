@@ -57,7 +57,7 @@ _FINISH_REASON_MAP: dict[BetaStopReason, FinishReason] = {
     'max_tokens': 'length',
     'stop_sequence': 'stop',
     'tool_use': 'tool_call',
-    'pause_turn': 'stop',
+    'pause_turn': 'incomplete',
     'refusal': 'content_filter',
 }
 
@@ -885,7 +885,7 @@ class AnthropicModel(Model):
                                     BetaMCPToolResultBlock(
                                         tool_use_id=tool_use_id,
                                         type='mcp_tool_result',
-                                        **cast(dict[str, Any], response_part.content),  # pyright: ignore[reportUnknownMemberType]
+                                        **response_part.content,  # pyright: ignore[reportUnknownMemberType]
                                     )
                                 )
                     elif isinstance(response_part, FilePart):  # pragma: no cover

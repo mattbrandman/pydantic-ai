@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import KW_ONLY, dataclass
+from typing import Any, Literal
 
 from pydantic_core import to_json
 
@@ -58,6 +58,7 @@ _FINISH_REASON_MAP: dict[PydanticFinishReason, FinishReason] = {
     'length': 'length',
     'content_filter': 'content-filter',
     'tool_call': 'tool-calls',
+    'incomplete': 'other',
     'error': 'error',
 }
 
@@ -76,6 +77,10 @@ def _json_dumps(obj: Any) -> str:
 class VercelAIEventStream(UIEventStream[RequestData, BaseChunk, AgentDepsT, OutputDataT]):
     """UI event stream transformer for the Vercel AI protocol."""
 
+    _: KW_ONLY
+    sdk_version: Literal[5, 6] = 5
+    """Vercel AI SDK version to target."""
+
     _step_started: bool = False
     _finish_reason: FinishReason = None
 
@@ -84,7 +89,7 @@ class VercelAIEventStream(UIEventStream[RequestData, BaseChunk, AgentDepsT, Outp
         return VERCEL_AI_DSP_HEADERS
 
     def encode_event(self, event: BaseChunk) -> str:
-        return f'data: {event.encode()}\n\n'
+        return f'data: {event.encode(self.sdk_version)}\n\n'
 
     async def before_stream(self) -> AsyncIterator[BaseChunk]:
         yield StartChunk()
