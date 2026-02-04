@@ -147,6 +147,36 @@ agent = Agent(model)
 
 See [Anthropic's Microsoft Foundry documentation](https://platform.claude.com/docs/en/build-with-claude/claude-in-microsoft-foundry) for setup instructions including Entra ID authentication.
 
+## Skills
+
+Anthropic skills extend the code execution environment with specialized instructions, scripts, and resources.
+To enable skills, include `CodeExecutionTool()` in `builtin_tools` and pass
+[`AnthropicModelSettings.anthropic_skills`][pydantic_ai.models.anthropic.AnthropicModelSettings.anthropic_skills].
+Pydantic AI will add the required `skills-2025-10-02` beta automatically.
+
+```python {test="skip"}
+from pydantic_ai import Agent
+from pydantic_ai.builtin_tools import CodeExecutionTool
+from pydantic_ai.models.anthropic import AnthropicModelSettings
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-5',
+    builtin_tools=[CodeExecutionTool()],
+)
+
+result = agent.run_sync(
+    'Summarize the attached PDF.',
+    model_settings=AnthropicModelSettings(
+        anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+    ),
+)
+print(result.output)
+```
+
+You can include up to 8 skills per request. Managed skill IDs include `pptx`, `xlsx`, `docx`, and `pdf`.
+For custom skills, use `type='custom'` with your uploaded skill ID.
+See [Anthropic's skills documentation](https://docs.anthropic.com/en/docs/agents-and-tools/agent-skills/overview) for details.
+
 ## Prompt Caching
 
 Anthropic supports [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) to reduce costs by caching parts of your prompts. Pydantic AI provides four ways to use prompt caching:
