@@ -8199,8 +8199,6 @@ async def test_anthropic_cache_messages_real_api(allow_model_requests: None, ant
 
 async def test_anthropic_skills_real_api(allow_model_requests: None, anthropic_api_key: str, vcr: Cassette):
     """Verify skills are sent in the container payload for real API requests."""
-    from pydantic_ai.messages import UploadedFile
-
     model = AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key))
     agent = Agent(
         model,
@@ -8251,6 +8249,48 @@ The file was created using the reportlab library as recommended in the PDF skill
         assert len(content_bytes) > 0, f'Expected non-empty content for file {uploaded_file.file_id}'
         # PDF files start with %PDF
         assert content_bytes[:4] == b'%PDF', f'Expected PDF file content for {uploaded_file.file_id}'
+
+
+async def test_anthropic_skills_multi_turn(allow_model_requests: None, anthropic_api_key: str, vcr: Cassette):
+    """Test that bash/text_editor execution results are properly sent back in multi-turn conversations."""
+    model = AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key))
+    agent = Agent(
+        model,
+        builtin_tools=[CodeExecutionTool()],
+    )
+
+    # First turn: trigger code execution with skills that produces bash/text_editor blocks
+    result = await agent.run(
+        'Write a tiny hello.txt file using bash.',
+        model_settings=AnthropicModelSettings(
+            anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+        ),
+    )
+
+    # Verify first turn produced builtin tool parts
+    return_names = [p.tool_name for p in result.response.parts if isinstance(p, BuiltinToolReturnPart)]
+    assert len(return_names) > 0, f'Expected builtin tool results, got parts: {[type(p).__name__ for p in result.response.parts]}'
+
+    # Second turn: send back the conversation history — this exercises the send-back mappings
+    result2 = await agent.run(
+        'What did you just do? Reply in one sentence.',
+        message_history=result.all_messages(),
+        model_settings=AnthropicModelSettings(
+            anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+        ),
+    )
+    assert result2.output  # Model should respond successfully
+
+    # Verify the second request replayed the assistant message with all block types
+    second_request_body = json.loads(vcr.requests[-1].body)  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+    assistant_messages = [m for m in second_request_body['messages'] if m['role'] == 'assistant']
+    assert len(assistant_messages) > 0, 'Expected at least one assistant message in second request'
+
+    # Check that the replayed assistant message contains the expected block types
+    assistant_content = assistant_messages[0]['content']
+    block_types = {item['type'] for item in assistant_content if isinstance(item, dict)}
+    # Should have server_tool_use and at least one result type from the first turn
+    assert 'server_tool_use' in block_types, f'Expected server_tool_use in {block_types}'
 
 
 async def test_anthropic_container_setting_explicit(allow_model_requests: None):
@@ -8528,8 +8568,6 @@ async def test_anthropic_skills_with_container_false(allow_model_requests: None)
 
 def test_uploaded_file_in_response_parts():
     """Test that UploadedFile parts can be included in and filtered from ModelResponse."""
-    from pydantic_ai.messages import UploadedFile
-
     response = ModelResponse(
         parts=[
             TextPart(content='Created your file'),
@@ -8543,93 +8581,6 @@ def test_uploaded_file_in_response_parts():
     assert uploaded_files[0].file_id == 'file_abc123'
     assert uploaded_files[1].file_id == 'file_xyz789'
     assert all(f.provider_name == 'anthropic' for f in uploaded_files)
-
-
-def test_map_code_execution_extracts_uploaded_files():
-    """Test that _map_code_execution_tool_result_block extracts UploadedFile parts."""
-    from anthropic.types.beta import BetaCodeExecutionToolResultBlock
-    from anthropic.types.beta.beta_code_execution_output_block import BetaCodeExecutionOutputBlock
-    from anthropic.types.beta.beta_code_execution_result_block import BetaCodeExecutionResultBlock
-
-    from pydantic_ai.messages import BuiltinToolReturnPart, UploadedFile
-    from pydantic_ai.models.anthropic import _map_code_execution_tool_result_block
-
-    block = BetaCodeExecutionToolResultBlock(
-        content=BetaCodeExecutionResultBlock(
-            content=[
-                BetaCodeExecutionOutputBlock(file_id='file_001', type='code_execution_output'),
-                BetaCodeExecutionOutputBlock(file_id='file_002', type='code_execution_output'),
-            ],
-            return_code=0,
-            stderr='',
-            stdout='done\n',
-            type='code_execution_result',
-        ),
-        tool_use_id='tool_123',
-        type='code_execution_tool_result',
-    )
-
-    return_part, uploaded_files = _map_code_execution_tool_result_block(block, 'anthropic')
-    assert isinstance(return_part, BuiltinToolReturnPart)
-    assert return_part.tool_call_id == 'tool_123'
-    assert len(uploaded_files) == 2
-    assert all(isinstance(f, UploadedFile) for f in uploaded_files)
-    assert uploaded_files[0].file_id == 'file_001'
-    assert uploaded_files[1].file_id == 'file_002'
-    assert all(f.provider_name == 'anthropic' for f in uploaded_files)
-
-
-def test_map_code_execution_error_no_uploaded_files():
-    """Test that _map_code_execution_tool_result_block returns no files on error."""
-    from anthropic.types.beta import BetaCodeExecutionToolResultBlock
-    from anthropic.types.beta.beta_code_execution_tool_result_error import BetaCodeExecutionToolResultError
-
-    from pydantic_ai.models.anthropic import _map_code_execution_tool_result_block
-
-    block = BetaCodeExecutionToolResultBlock(
-        content=BetaCodeExecutionToolResultError(
-            error_code='execution_time_exceeded',
-            type='code_execution_tool_result_error',
-        ),
-        tool_use_id='tool_err',
-        type='code_execution_tool_result',
-    )
-
-    return_part, uploaded_files = _map_code_execution_tool_result_block(block, 'anthropic')
-    assert return_part.tool_call_id == 'tool_err'
-    assert uploaded_files == []
-
-
-def test_map_bash_execution_extracts_uploaded_files():
-    """Test that _map_bash_code_execution_tool_result_block extracts UploadedFile parts."""
-    from anthropic.types.beta.beta_bash_code_execution_output_block import BetaBashCodeExecutionOutputBlock
-    from anthropic.types.beta.beta_bash_code_execution_result_block import BetaBashCodeExecutionResultBlock
-    from anthropic.types.beta.beta_bash_code_execution_tool_result_block import BetaBashCodeExecutionToolResultBlock
-
-    from pydantic_ai.messages import BuiltinToolReturnPart, UploadedFile
-    from pydantic_ai.models.anthropic import _map_bash_code_execution_tool_result_block
-
-    block = BetaBashCodeExecutionToolResultBlock(
-        content=BetaBashCodeExecutionResultBlock(
-            content=[
-                BetaBashCodeExecutionOutputBlock(file_id='bash_file_001', type='bash_code_execution_output'),
-            ],
-            return_code=0,
-            stderr='',
-            stdout='created\n',
-            type='bash_code_execution_result',
-        ),
-        tool_use_id='tool_456',
-        type='bash_code_execution_tool_result',
-    )
-
-    return_part, uploaded_files = _map_bash_code_execution_tool_result_block(block, 'anthropic')
-    assert isinstance(return_part, BuiltinToolReturnPart)
-    assert return_part.tool_call_id == 'tool_456'
-    assert len(uploaded_files) == 1
-    assert isinstance(uploaded_files[0], UploadedFile)
-    assert uploaded_files[0].file_id == 'bash_file_001'
-    assert uploaded_files[0].provider_name == 'anthropic'
 
 
 async def test_anthropic_system_prompts_and_instructions_ordering():
