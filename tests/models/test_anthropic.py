@@ -68,8 +68,14 @@ with try_import() as imports_successful:
     from anthropic.lib.tools import BetaAbstractMemoryTool
     from anthropic.resources.beta import AsyncBeta
     from anthropic.types.beta import (
+        BetaBashCodeExecutionOutputBlock,
+        BetaBashCodeExecutionResultBlock,
+        BetaBashCodeExecutionToolResultBlock,
+        BetaBashCodeExecutionToolResultError,
+        BetaCodeExecutionOutputBlock,
         BetaCodeExecutionResultBlock,
         BetaCodeExecutionToolResultBlock,
+        BetaCodeExecutionToolResultError,
         BetaContentBlock,
         BetaDirectCaller,
         BetaInputJSONDelta,
@@ -92,6 +98,8 @@ with try_import() as imports_successful:
         BetaServerToolUseBlock,
         BetaTextBlock,
         BetaTextDelta,
+        BetaTextEditorCodeExecutionCreateResultBlock,
+        BetaTextEditorCodeExecutionToolResultBlock,
         BetaToolUseBlock,
         BetaUsage,
         BetaWebSearchResultBlock,
@@ -7328,6 +7336,186 @@ async def test_anthropic_code_execution_tool_pass_history_back(env: TestEnv, all
     agent2 = Agent(m)
     result2 = await agent2.run('What was the code execution result?', message_history=result.all_messages())
     assert result2.output == 'The code execution returned the result: 4'
+
+
+async def test_anthropic_text_editor_tool_result_pass_history_back(allow_model_requests: None):
+    """Test passing text editor tool history back to Anthropic."""
+    response = completion_message(
+        [BetaTextBlock(text='Done.', type='text')], BetaUsage(input_tokens=5, output_tokens=5)
+    )
+    mock_client = MockAnthropic.create_mock(response)
+    m = AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content='Create a file')]),
+        ModelResponse(
+            parts=[
+                BuiltinToolCallPart(
+                    tool_name='text_editor_code_execution',
+                    args={'command': 'create', 'path': '/tmp/hello.txt', 'file_text': 'hello'},
+                    tool_call_id='srvtool_123',
+                    provider_name='anthropic',
+                ),
+                BuiltinToolReturnPart(
+                    tool_name='text_editor_code_execution',
+                    content={
+                        'type': 'text_editor_code_execution_tool_result',
+                        'tool_use_id': 'srvtool_123',
+                        'content': {'type': 'text_editor_code_execution_create_result', 'is_file_update': False},
+                    },
+                    tool_call_id='srvtool_123',
+                    provider_name='anthropic',
+                ),
+            ],
+            provider_name='anthropic',
+        ),
+    ]
+
+    await agent.run('Follow up', message_history=history)
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    assistant_messages = [m for m in completion_kwargs['messages'] if m['role'] == 'assistant']
+    assert len(assistant_messages) == 1
+    assistant_content = cast(list[dict[str, Any]], assistant_messages[0]['content'])
+    text_editor_block = next(
+        block for block in assistant_content if block.get('type') == 'text_editor_code_execution_tool_result'
+    )
+    assert text_editor_block['tool_use_id'] == 'srvtool_123'
+    assert text_editor_block['content'] == {
+        'type': 'text_editor_code_execution_create_result',
+        'is_file_update': False,
+    }
+
+
+async def test_anthropic_code_and_bash_tool_error_blocks_no_uploaded_files(allow_model_requests: None):
+    response = completion_message(
+        [
+            BetaCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_code',
+                type='code_execution_tool_result',
+                content=BetaCodeExecutionToolResultError(
+                    type='code_execution_tool_result_error',
+                    error_code='unavailable',
+                ),
+            ),
+            BetaBashCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_bash',
+                type='bash_code_execution_tool_result',
+                content=BetaBashCodeExecutionToolResultError(
+                    type='bash_code_execution_tool_result_error',
+                    error_code='unavailable',
+                ),
+            ),
+            BetaTextBlock(text='done', type='text'),
+        ],
+        BetaUsage(input_tokens=5, output_tokens=5),
+    )
+    mock_client = MockAnthropic.create_mock(response)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    result = await agent.run('hello')
+    parts = result.response.parts
+
+    tool_names = {part.tool_name for part in parts if isinstance(part, BuiltinToolReturnPart)}
+    assert {'code_execution', 'bash_code_execution_tool_result'} <= tool_names
+    assert not any(isinstance(part, UploadedFile) for part in parts)
+
+
+async def test_anthropic_stream_tool_results_with_uploaded_files(allow_model_requests: None):
+    """Test streaming tool result blocks that include uploaded files."""
+    stream_events: list[BetaRawMessageStreamEvent] = [
+        BetaRawMessageStartEvent(
+            type='message_start',
+            message=BetaMessage(
+                id='msg_123',
+                content=[],
+                model='claude-3-5-haiku-123',
+                role='assistant',
+                stop_reason=None,
+                type='message',
+                usage=BetaUsage(input_tokens=5, output_tokens=0),
+            ),
+        ),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=0,
+            content_block=BetaCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_code',
+                type='code_execution_tool_result',
+                content=BetaCodeExecutionResultBlock(
+                    content=[BetaCodeExecutionOutputBlock(type='code_execution_output', file_id='file_code_1')],
+                    return_code=0,
+                    stderr='',
+                    stdout='ok',
+                    type='code_execution_result',
+                ),
+            ),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=0),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=1,
+            content_block=BetaTextEditorCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_text',
+                type='text_editor_code_execution_tool_result',
+                content=BetaTextEditorCodeExecutionCreateResultBlock(
+                    type='text_editor_code_execution_create_result',
+                    is_file_update=False,
+                ),
+            ),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=1),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=2,
+            content_block=BetaBashCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_bash',
+                type='bash_code_execution_tool_result',
+                content=BetaBashCodeExecutionResultBlock(
+                    content=[
+                        BetaBashCodeExecutionOutputBlock(type='bash_code_execution_output', file_id='file_bash_1')
+                    ],
+                    return_code=0,
+                    stderr='',
+                    stdout='ok',
+                    type='bash_code_execution_result',
+                ),
+            ),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=2),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=3,
+            content_block=BetaTextBlock(text='done', type='text'),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=3),
+        BetaRawMessageDeltaEvent(
+            type='message_delta',
+            delta=Delta(stop_reason='end_turn'),
+            usage=BetaMessageDeltaUsage(output_tokens=5),
+        ),
+        BetaRawMessageStopEvent(type='message_stop'),
+    ]
+
+    mock_client = MockAnthropic.create_stream_mock(stream_events)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool()])
+
+    async with agent.run_stream('hello') as result:
+        assert await result.get_output() == 'done'
+
+    messages = result.all_messages()
+    response = messages[-1]
+    assert isinstance(response, ModelResponse)
+
+    uploaded_files = [part for part in response.parts if isinstance(part, UploadedFile)]
+    assert [file.file_id for file in uploaded_files] == ['file_code_1', 'file_bash_1']
+    assert all(file.provider_name == 'anthropic' for file in uploaded_files)
+
+    tool_names = {part.tool_name for part in response.parts if isinstance(part, BuiltinToolReturnPart)}
+    assert {'code_execution', 'text_editor_code_execution', 'bash_code_execution_tool_result'} <= tool_names
 
 
 async def test_anthropic_web_search_tool_stream(allow_model_requests: None, anthropic_api_key: str):

@@ -505,6 +505,11 @@ def test_file_part_has_content():
     assert filepart.has_content()
 
 
+def test_uploaded_file_has_content():
+    uploaded_file = UploadedFile(file_id='file-abc123', provider_name='anthropic')
+    assert uploaded_file.has_content()
+
+
 def test_file_part_serialization_roundtrip():
     # Verify that a serialized BinaryImage doesn't come back as a BinaryContent.
     messages: list[ModelMessage] = [
