@@ -3172,6 +3172,50 @@ async def test_adapter_dump_messages_with_files():
     )
 
 
+async def test_adapter_dump_messages_with_uploaded_file_response():
+    """Test dumping messages with UploadedFile in the response."""
+    messages = [
+        ModelRequest(parts=[UserPromptPart(content='Here is a file')]),
+        ModelResponse(
+            parts=[
+                UploadedFile(file_id='file-abc123', provider_name='openai', media_type='application/pdf'),
+            ]
+        ),
+    ]
+
+    ui_messages = VercelAIAdapter.dump_messages(messages)
+    ui_message_dicts = [msg.model_dump() for msg in ui_messages]
+
+    assert ui_message_dicts == snapshot(
+        [
+            {
+                'id': IsStr(),
+                'role': 'user',
+                'metadata': None,
+                'parts': [
+                    {'type': 'text', 'text': 'Here is a file', 'state': 'done', 'provider_metadata': None},
+                ],
+            },
+            {
+                'id': IsStr(),
+                'role': 'assistant',
+                'metadata': None,
+                'parts': [
+                    {
+                        'type': 'file',
+                        'media_type': 'application/pdf',
+                        'filename': None,
+                        'url': 'file-abc123',
+                        'provider_metadata': {
+                            'pydantic_ai': {'uploaded_file_id': 'file-abc123', 'provider_name': 'openai'}
+                        },
+                    }
+                ],
+            },
+        ]
+    )
+
+
 async def test_adapter_dump_messages_with_retry():
     """Test dumping messages with retry prompts."""
     messages = [
