@@ -29,6 +29,7 @@ from ..messages import (
     ToolCallPart,
     ToolCallPartDelta,
     ToolReturnPart,
+    UploadedFile,
 )
 from ..output import OutputDataT
 from ..run import AgentRunResult, AgentRunResultEvent
@@ -306,9 +307,11 @@ class UIEventStream(ABC, Generic[RunInputT, EventT, AgentDepsT, OutputDataT]):
             case BuiltinToolReturnPart():
                 async for e in self.handle_builtin_tool_return(part):
                     yield e
-            case FilePart():  # pragma: no branch
+            case FilePart():
                 async for e in self.handle_file(part):
                     yield e
+            case UploadedFile():  # pragma: no branch
+                pass
 
     async def handle_part_delta(self, event: PartDeltaEvent) -> AsyncIterator[EventT]:
         """Handle a PartDeltaEvent.
@@ -370,6 +373,8 @@ class UIEventStream(ABC, Generic[RunInputT, EventT, AgentDepsT, OutputDataT]):
                     yield e
             case BuiltinToolReturnPart() | FilePart():  # pragma: no cover
                 # These don't have deltas, so they don't need to be ended.
+                pass
+            case UploadedFile():  # pragma: no branch
                 pass
 
     async def before_stream(self) -> AsyncIterator[EventT]:

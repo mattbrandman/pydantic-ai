@@ -35,6 +35,7 @@ from ..messages import (
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
+    UploadedFile,
     UserPromptPart,
 )
 from ..profiles import ModelProfile, ModelProfileSpec
@@ -484,6 +485,9 @@ class OutlinesModel(Model):
                             raise UserError(
                                 'File parts other than `BinaryImage` are not supported for Outlines models yet.'
                             )
+                    elif isinstance(part, UploadedFile):  # pragma: no cover
+                        # Uploaded file references are not sent back to models that don't support them.
+                        pass
                     else:
                         assert_never(part)
                 if len(text_parts) == 1 and len(image_parts) == 0:
