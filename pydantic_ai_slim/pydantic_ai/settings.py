@@ -166,6 +166,7 @@ class ModelSettings(TypedDict, total=False):
 
     * OpenAI
     * Anthropic
+    * Gemini
     * Groq
     * xAI
     """
@@ -179,6 +180,21 @@ class ModelSettings(TypedDict, total=False):
     * Anthropic
     * Groq
     * Outlines (all providers)
+    """
+
+    max_continuations: int
+    """Maximum number of continuation requests for incomplete responses.
+
+    This limits how many times the agent will automatically re-request when a model
+    response has `expects_continuation=True` (e.g. Anthropic `pause_turn`, OpenAI
+    Responses API with `openai_background` enabled).
+
+    Defaults to 5 if not specified.
+
+    Supported by:
+
+    * Anthropic
+    * OpenAI (Responses API with `openai_background` enabled)
     """
 
 
