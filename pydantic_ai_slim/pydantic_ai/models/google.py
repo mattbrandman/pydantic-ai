@@ -37,6 +37,7 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
+    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -768,6 +769,8 @@ class GoogleModel(Model):
                     if item.vendor_metadata:
                         part_dict['video_metadata'] = cast(VideoMetadataDict, item.vendor_metadata)
                     content.append(part_dict)
+                elif isinstance(item, SandboxFile):
+                    raise UserError('SandboxFile is not yet supported by GoogleModel.')
                 elif isinstance(item, CachePoint):
                     # Google doesn't support inline CachePoint markers. Google's caching requires
                     # pre-creating cache objects via the API, then referencing them by name using
@@ -1074,7 +1077,7 @@ def _content_model_response(m: ModelResponse, provider_name: str) -> ContentDict
             content = item.content
             inline_data_dict: BlobDict = {'data': content.data, 'mime_type': content.media_type}
             part['inline_data'] = inline_data_dict
-        elif isinstance(item, UploadedFile):
+        elif isinstance(item, (UploadedFile, SandboxFile)):
             pass
         else:
             assert_never(item)

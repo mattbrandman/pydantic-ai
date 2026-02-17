@@ -25,6 +25,7 @@ from ...messages import (
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
+    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -452,6 +453,9 @@ class VercelAIAdapter(UIAdapter[RequestData, UIMessage, BaseChunk, AgentDepsT, O
                 ui_parts.append(
                     FileUIPart(url=part.file_id, media_type=media_type, provider_metadata=provider_metadata)
                 )
+            elif isinstance(part, SandboxFile):
+                # SandboxFile references are informational; skip in UI rendering
+                pass
             elif isinstance(part, ToolCallPart):
                 tool_result = tool_results.get(part.tool_call_id)
                 call_provider_metadata = dump_provider_metadata(
@@ -565,6 +569,9 @@ def _convert_user_prompt_part(part: UserPromptPart) -> list[UIMessagePart]:
                 ui_parts.append(
                     FileUIPart(url=item.file_id, media_type=item.media_type, provider_metadata=provider_metadata)
                 )
+            elif isinstance(item, SandboxFile):
+                # SandboxFile references are for code execution sandboxes, skip for UI
+                pass
             elif isinstance(item, CachePoint):
                 # CachePoint is metadata for prompt caching, skip for UI conversion
                 pass

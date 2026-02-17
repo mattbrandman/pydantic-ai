@@ -32,6 +32,7 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
+    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -478,6 +479,8 @@ class XaiModel(Model):
                         f'Expected `provider_name` to be `{self.system!r}`.'
                     )
                 content_items.append(file(item.file_id))
+            elif isinstance(item, SandboxFile):
+                raise UserError('SandboxFile is not yet supported by XaiModel.')
             elif isinstance(item, CachePoint):
                 # xAI doesn't support prompt caching via CachePoint, so we filter it out
                 pass

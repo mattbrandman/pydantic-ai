@@ -38,6 +38,7 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
+    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -404,6 +405,8 @@ class GeminiModel(Model):
                     raise NotImplementedError(
                         'UploadedFile is not supported by GeminiModel. Use GoogleModel with the Files API instead.'
                     )
+                elif isinstance(item, SandboxFile):  # pragma: no cover
+                    raise NotImplementedError('SandboxFile is not supported by GeminiModel.')
                 elif isinstance(item, CachePoint):
                     # Gemini doesn't support inline CachePoint markers. Google's caching requires
                     # pre-creating cache objects via the API, then referencing them by name using

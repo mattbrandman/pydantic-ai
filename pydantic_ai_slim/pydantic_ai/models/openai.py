@@ -48,6 +48,7 @@ from ..messages import (
     ModelResponseStreamEvent,
     PartStartEvent,
     RetryPromptPart,
+    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -1037,7 +1038,7 @@ class OpenAIChatModel(Model):
             # OpenAI doesn't return built-in tool calls
             pass
 
-        def _map_response_file_part(self, item: FilePart | UploadedFile) -> None:
+        def _map_response_file_part(self, item: FilePart | UploadedFile | SandboxFile) -> None:
             """Maps a `FilePart` or `UploadedFile` to the response context.
 
             This method serves as a hook that can be overridden by subclasses
@@ -1234,7 +1235,16 @@ class OpenAIChatModel(Model):
         raise NotImplementedError('VideoUrl is not supported for OpenAI')
 
     async def _map_content_item(
-        self, item: str | ImageUrl | BinaryContent | AudioUrl | DocumentUrl | VideoUrl | UploadedFile | CachePoint
+        self,
+        item: str
+        | ImageUrl
+        | BinaryContent
+        | AudioUrl
+        | DocumentUrl
+        | VideoUrl
+        | UploadedFile
+        | SandboxFile
+        | CachePoint,
     ) -> ChatCompletionContentPartParam | None:
         """Map a single content item to a chat completion content part, or None to filter it out."""
         if isinstance(item, str):
@@ -1260,6 +1270,8 @@ class OpenAIChatModel(Model):
                 file=FileFile(file_id=item.file_id),
                 type='file',
             )
+        elif isinstance(item, SandboxFile):
+            raise UserError('SandboxFile is not yet supported by OpenAIChatModel.')
         elif isinstance(item, CachePoint):
             # OpenAI doesn't support prompt caching via CachePoint, so we filter it out
             return None
@@ -2216,6 +2228,8 @@ class OpenAIResponsesModel(Model):
                             file_id=item.file_id,
                         )
                     )
+                elif isinstance(item, SandboxFile):
+                    raise UserError('SandboxFile is not yet supported by OpenAIResponsesModel.')
                 elif isinstance(item, CachePoint):
                     # OpenAI doesn't support prompt caching via CachePoint, so we filter it out
                     pass
