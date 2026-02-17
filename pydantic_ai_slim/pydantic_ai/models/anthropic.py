@@ -37,6 +37,7 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
+    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -1045,7 +1046,7 @@ class AnthropicModel(Model):
                                         **response_part.content,  # pyright: ignore[reportUnknownMemberType]
                                     )
                                 )
-                    elif isinstance(response_part, (FilePart, UploadedFile)):  # pragma: no cover
+                    elif isinstance(response_part, (FilePart, UploadedFile, SandboxFile)):  # pragma: no cover
                         # Files/uploads in responses are informational; the BuiltinToolReturnPart
                         # already contains the file info for the model.
                         pass
@@ -1294,6 +1295,13 @@ class AnthropicModel(Model):
                             f'Unsupported media type {item.media_type!r} for Anthropic file upload. '
                             'Only image and document (text/application) types are supported.'
                         )
+                elif isinstance(item, SandboxFile):
+                    if item.provider_name != self.system:
+                        raise UserError(
+                            f'SandboxFile with `provider_name={item.provider_name!r}` cannot be used with AnthropicModel. '
+                            f'Expected `provider_name` to be `{self.system!r}`.'
+                        )
+                    yield cast(BetaContentBlockParam, {'type': 'container_upload', 'file_id': item.file_id})
                 else:
                     raise RuntimeError(f'Unsupported content type: {type(item)}')  # pragma: no cover
 

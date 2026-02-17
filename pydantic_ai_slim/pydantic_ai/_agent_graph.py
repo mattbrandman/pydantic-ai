@@ -688,9 +688,9 @@ class CallToolsNode(AgentNode[DepsT, NodeRunEndT]):
                         tool_calls.append(part)
                     elif isinstance(part, _messages.FilePart):
                         files.append(part.content)
-                    elif isinstance(part, _messages.UploadedFile):
-                        # UploadedFile parts are informational file references (e.g. from code execution)
-                        # that don't affect agent flow.
+                    elif isinstance(part, (_messages.UploadedFile, _messages.SandboxFile)):
+                        # UploadedFile/SandboxFile parts are informational file references
+                        # (e.g. from code execution) that don't affect agent flow.
                         pass
                     elif isinstance(part, _messages.BuiltinToolCallPart):
                         # Text parts before a built-in tool call are essentially thoughts,

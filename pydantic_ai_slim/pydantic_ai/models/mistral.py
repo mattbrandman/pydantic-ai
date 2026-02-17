@@ -28,6 +28,7 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
+    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -610,6 +611,8 @@ class MistralModel(Model):
                     raise RuntimeError('VideoUrl is not supported in Mistral.')
                 elif isinstance(item, UploadedFile):
                     raise RuntimeError('UploadedFile is not supported by Mistral.')
+                elif isinstance(item, SandboxFile):
+                    raise RuntimeError('SandboxFile is not supported by Mistral.')
                 else:  # pragma: no cover
                     raise RuntimeError(f'Unsupported content type: {type(item)}')
         return MistralUserMessage(content=content)

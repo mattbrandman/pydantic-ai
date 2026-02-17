@@ -31,6 +31,7 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
+    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -515,6 +516,8 @@ class GroqModel(Model):
                     raise RuntimeError('DocumentUrl is not supported in Groq.')
                 elif isinstance(item, UploadedFile):
                     raise RuntimeError('UploadedFile is not supported by Groq.')
+                elif isinstance(item, SandboxFile):
+                    raise RuntimeError('SandboxFile is not supported by Groq.')
                 else:  # pragma: no cover
                     raise RuntimeError(f'Unsupported content type: {type(item)}')
 
