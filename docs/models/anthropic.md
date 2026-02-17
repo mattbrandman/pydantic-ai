@@ -177,6 +177,8 @@ You can include up to 8 skills per request. Managed skill IDs include `pptx`, `x
 For custom skills, use `type='custom'` with your uploaded skill ID.
 See [Anthropic's skills documentation](https://docs.anthropic.com/en/docs/agents-and-tools/agent-skills/overview) for details.
 
+To load files into the code execution sandbox (e.g., for data analysis), use [`SandboxFile`](../input.md#sandbox-files) instead of [`UploadedFile`](../input.md#uploaded-files). `SandboxFile` maps to Anthropic's `container_upload` content block, making files accessible on the sandbox filesystem.
+
 ## Prompt Caching
 
 Anthropic supports [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) to reduce costs by caching parts of your prompts. Pydantic AI provides four ways to use prompt caching:
