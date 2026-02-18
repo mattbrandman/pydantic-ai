@@ -13,6 +13,7 @@ from typing import Annotated, Any, TypeVar, cast
 import httpx
 import pytest
 from pydantic import BaseModel, Field
+from vcr.cassette import Cassette
 
 from pydantic_ai import (
     Agent,
@@ -45,10 +46,11 @@ from pydantic_ai import (
     UserPromptPart,
 )
 from pydantic_ai.builtin_tools import CodeExecutionTool, MCPServerTool, MemoryTool, WebFetchTool, WebSearchTool
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.exceptions import UnexpectedModelBehavior, UserError
 from pydantic_ai.messages import (
     BuiltinToolCallEvent,  # pyright: ignore[reportDeprecated]
     BuiltinToolResultEvent,  # pyright: ignore[reportDeprecated]
+    UploadedFile,
 )
 from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.output import NativeOutput, PromptedOutput, TextOutput, ToolOutput
@@ -66,8 +68,14 @@ with try_import() as imports_successful:
     from anthropic.lib.tools import BetaAbstractMemoryTool
     from anthropic.resources.beta import AsyncBeta
     from anthropic.types.beta import (
+        BetaBashCodeExecutionOutputBlock,
+        BetaBashCodeExecutionResultBlock,
+        BetaBashCodeExecutionToolResultBlock,
+        BetaBashCodeExecutionToolResultError,
+        BetaCodeExecutionOutputBlock,
         BetaCodeExecutionResultBlock,
         BetaCodeExecutionToolResultBlock,
+        BetaCodeExecutionToolResultError,
         BetaContentBlock,
         BetaDirectCaller,
         BetaInputJSONDelta,
@@ -90,6 +98,8 @@ with try_import() as imports_successful:
         BetaServerToolUseBlock,
         BetaTextBlock,
         BetaTextDelta,
+        BetaTextEditorCodeExecutionCreateResultBlock,
+        BetaTextEditorCodeExecutionToolResultBlock,
         BetaToolUseBlock,
         BetaUsage,
         BetaWebSearchResultBlock,
@@ -274,6 +284,93 @@ async def test_sync_request_text_response(allow_model_requests: None):
             ),
         ]
     )
+
+
+async def test_pause_turn_continues_run(allow_model_requests: None):
+    c1 = completion_message([BetaTextBlock(text='paused', type='text')], BetaUsage(input_tokens=10, output_tokens=5))
+    c1.stop_reason = 'pause_turn'
+    c2 = completion_message([BetaTextBlock(text='final', type='text')], BetaUsage(input_tokens=10, output_tokens=5))
+
+    mock_client = MockAnthropic.create_mock([c1, c2])
+    model = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(model)
+
+    result = await agent.run('test prompt')
+
+    assert result.output == 'final'
+    assert result.all_messages() == snapshot(
+        [
+            ModelRequest(
+                parts=[UserPromptPart(content='test prompt', timestamp=IsDatetime())],
+                timestamp=IsDatetime(),
+                run_id=IsStr(),
+            ),
+            ModelResponse(
+                parts=[TextPart(content='final')],
+                usage=RequestUsage(input_tokens=10, output_tokens=5, details={'input_tokens': 10, 'output_tokens': 5}),
+                model_name='claude-3-5-haiku-123',
+                timestamp=IsDatetime(),
+                provider_name='anthropic',
+                provider_url='https://api.anthropic.com',
+                provider_details={'finish_reason': 'end_turn'},
+                provider_response_id='123',
+                finish_reason='stop',
+                run_id=IsStr(),
+            ),
+        ]
+    )
+
+
+async def test_pause_turn_exceeds_max_continuations(allow_model_requests: None):
+    """Test that exceeding the default max continuations (50) raises UnexpectedModelBehavior."""
+    responses: list[BetaMessage | Exception] = []
+    for _ in range(51):
+        c = completion_message([BetaTextBlock(text='paused', type='text')], BetaUsage(input_tokens=10, output_tokens=5))
+        c.stop_reason = 'pause_turn'
+        responses.append(c)
+
+    mock_client = MockAnthropic.create_mock(responses)
+    model = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(model)
+
+    with pytest.raises(UnexpectedModelBehavior, match='Exceeded maximum continuations \\(50\\)'):
+        await agent.run('test prompt')
+
+
+@pytest.mark.vcr()
+async def test_pause_turn_web_search_vcr(allow_model_requests: None, anthropic_api_key: str):
+    model = AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key))
+    settings = AnthropicModelSettings(anthropic_thinking={'type': 'enabled', 'budget_tokens': 4096}, max_tokens=15000)
+    agent = Agent(model, builtin_tools=[WebSearchTool()], model_settings=settings)
+
+    prompt = (
+        'Run a series of web searches to gather up-to-date context. '
+        'Do 6 separate searches, one at a time, and do not answer until all searches are complete. '
+        'Queries: '
+        '1) "San Francisco weather today", '
+        '2) "San Francisco sunrise time today", '
+        '3) "Golden Gate Bridge traffic today", '
+        '4) "San Francisco air quality today", '
+        '5) "San Francisco events this week", '
+        '6) "San Francisco ferry schedule today". '
+        '7) "prevailing information on quantum computing today", '
+        '8) "latest news on the stock market today", '
+        '9) "latest news on the weather in San Francisco today", '
+        '10) "latest news on the traffic in San Francisco today", '
+        '11) "latest news on the air quality in San Francisco today", '
+        '12) "latest news on the events in San Francisco this week", '
+        '13) "latest news on the ferry schedule in San Francisco today", '
+        '14) "latest news on the quantum computing in San Francisco today", '
+        '15) "latest news on the stock market in San Francisco today", '
+        'After the searches, provide a concise summary.'
+    )
+
+    result = await agent.run(prompt)
+
+    # With ContinueRequestNode, pause_turn responses are merged into the final response
+    # and no longer appear as separate messages in the history.
+    # Verify the agent completed successfully (which exercises the continuation path).
+    assert result.output
 
 
 async def test_async_request_prompt_caching(allow_model_requests: None):
@@ -1949,6 +2046,149 @@ async def test_text_document_as_binary_content_input(
 
     result = await agent.run(['What does this text file say?', text_document_content])
     assert result.output == snapshot('The text file says "Dummy TXT file".')
+
+
+async def test_uploaded_file_with_text(allow_model_requests: None) -> None:
+    """Test that UploadedFile is correctly mapped to a document block with file source."""
+    c = completion_message(
+        [BetaTextBlock(text='The file contains important data.', type='text')],
+        usage=BetaUsage(input_tokens=10, output_tokens=8),
+    )
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    result = await agent.run(['Analyze this file', UploadedFile(file_id='file-abc123', provider_name='anthropic')])
+
+    assert result.output == 'The file contains important data.'
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    messages = completion_kwargs['messages']
+    assert messages == snapshot(
+        [
+            {
+                'role': 'user',
+                'content': [
+                    {'text': 'Analyze this file', 'type': 'text'},
+                    {'source': {'file_id': 'file-abc123', 'type': 'file'}, 'type': 'document'},
+                ],
+            }
+        ]
+    )
+
+
+async def test_uploaded_file_only(allow_model_requests: None) -> None:
+    """Test UploadedFile as the only content in a message."""
+    c = completion_message(
+        [BetaTextBlock(text='This is a PDF document.', type='text')],
+        usage=BetaUsage(input_tokens=5, output_tokens=6),
+    )
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    result = await agent.run([UploadedFile(file_id='file-xyz789', provider_name='anthropic')])
+
+    assert result.output == 'This is a PDF document.'
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    content = completion_kwargs['messages'][0]['content']
+    assert content == snapshot([{'source': {'file_id': 'file-xyz789', 'type': 'file'}, 'type': 'document'}])
+
+
+async def test_multiple_uploaded_files(allow_model_requests: None) -> None:
+    """Test multiple UploadedFiles in a single message."""
+    c = completion_message(
+        [BetaTextBlock(text='Both files contain similar data.', type='text')],
+        usage=BetaUsage(input_tokens=15, output_tokens=7),
+    )
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    result = await agent.run(
+        [
+            'Compare these files',
+            UploadedFile(file_id='file-001', provider_name='anthropic'),
+            UploadedFile(file_id='file-002', provider_name='anthropic'),
+        ]
+    )
+
+    assert result.output == 'Both files contain similar data.'
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    content = completion_kwargs['messages'][0]['content']
+    assert content == snapshot(
+        [
+            {'text': 'Compare these files', 'type': 'text'},
+            {'source': {'file_id': 'file-001', 'type': 'file'}, 'type': 'document'},
+            {'source': {'file_id': 'file-002', 'type': 'file'}, 'type': 'document'},
+        ]
+    )
+
+
+async def test_uploaded_file_image(allow_model_requests: None) -> None:
+    """Test that UploadedFile with image media type is mapped to an image block."""
+    c = completion_message(
+        [BetaTextBlock(text='The image shows a cat.', type='text')],
+        usage=BetaUsage(input_tokens=10, output_tokens=6),
+    )
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    result = await agent.run(
+        ['Describe this image', UploadedFile(file_id='file-img123', provider_name='anthropic', media_type='image/png')]
+    )
+
+    assert result.output == 'The image shows a cat.'
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    messages = completion_kwargs['messages']
+    assert messages == snapshot(
+        [
+            {
+                'role': 'user',
+                'content': [
+                    {'text': 'Describe this image', 'type': 'text'},
+                    {'source': {'file_id': 'file-img123', 'type': 'file'}, 'type': 'image'},
+                ],
+            }
+        ]
+    )
+
+
+async def test_uploaded_file_wrong_provider(allow_model_requests: None) -> None:
+    """Test that UploadedFile with wrong provider raises an error."""
+    c = completion_message(
+        [BetaTextBlock(text='Should not reach here.', type='text')],
+        usage=BetaUsage(input_tokens=10, output_tokens=8),
+    )
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    with pytest.raises(UserError, match="provider_name='openai'.*cannot be used with AnthropicModel"):
+        await agent.run(['Analyze this file', UploadedFile(file_id='file-abc123', provider_name='openai')])
+
+
+async def test_uploaded_file_unsupported_media_type(allow_model_requests: None) -> None:
+    """Test that UploadedFile with unsupported media type (e.g. audio) raises an error."""
+    c = completion_message(
+        [BetaTextBlock(text='Should not reach here.', type='text')],
+        usage=BetaUsage(input_tokens=10, output_tokens=8),
+    )
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    with pytest.raises(UserError, match='Unsupported media type.*audio/mpeg'):
+        await agent.run(
+            [
+                'Analyze this file',
+                UploadedFile(file_id='file-abc123', provider_name='anthropic', media_type='audio/mpeg'),
+            ]
+        )
 
 
 def test_init_with_provider():
@@ -5258,7 +5498,7 @@ async def test_anthropic_web_fetch_tool_with_parameters():
     )
 
     # Get tools from model
-    tools, _, _ = m._add_builtin_tools([], model_request_parameters)  # pyright: ignore[reportPrivateUsage]
+    tools, _, _ = m._add_builtin_tools([], model_request_parameters, AnthropicModelSettings())  # pyright: ignore[reportPrivateUsage]
 
     # Find the web_fetch tool
     web_fetch_tool_param = next((t for t in tools if t.get('name') == 'web_fetch'), None)
@@ -5291,7 +5531,7 @@ async def test_anthropic_web_fetch_tool_domain_filtering():
     )
 
     # Get tools from model
-    tools, _, _ = m._add_builtin_tools([], model_request_parameters)  # pyright: ignore[reportPrivateUsage]
+    tools, _, _ = m._add_builtin_tools([], model_request_parameters, AnthropicModelSettings())  # pyright: ignore[reportPrivateUsage]
 
     # Find the web_fetch tool
     web_fetch_tool_param = next((t for t in tools if t.get('name') == 'web_fetch'), None)
@@ -7185,6 +7425,186 @@ async def test_anthropic_code_execution_tool_pass_history_back(env: TestEnv, all
     assert result2.output == 'The code execution returned the result: 4'
 
 
+async def test_anthropic_text_editor_tool_result_pass_history_back(allow_model_requests: None):
+    """Test passing text editor tool history back to Anthropic."""
+    response = completion_message(
+        [BetaTextBlock(text='Done.', type='text')], BetaUsage(input_tokens=5, output_tokens=5)
+    )
+    mock_client = MockAnthropic.create_mock(response)
+    m = AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content='Create a file')]),
+        ModelResponse(
+            parts=[
+                BuiltinToolCallPart(
+                    tool_name='text_editor_code_execution',
+                    args={'command': 'create', 'path': '/tmp/hello.txt', 'file_text': 'hello'},
+                    tool_call_id='srvtool_123',
+                    provider_name='anthropic',
+                ),
+                BuiltinToolReturnPart(
+                    tool_name='text_editor_code_execution',
+                    content={
+                        'type': 'text_editor_code_execution_tool_result',
+                        'tool_use_id': 'srvtool_123',
+                        'content': {'type': 'text_editor_code_execution_create_result', 'is_file_update': False},
+                    },
+                    tool_call_id='srvtool_123',
+                    provider_name='anthropic',
+                ),
+            ],
+            provider_name='anthropic',
+        ),
+    ]
+
+    await agent.run('Follow up', message_history=history)
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    assistant_messages = [m for m in completion_kwargs['messages'] if m['role'] == 'assistant']
+    assert len(assistant_messages) == 1
+    assistant_content = cast(list[dict[str, Any]], assistant_messages[0]['content'])
+    text_editor_block = next(
+        block for block in assistant_content if block.get('type') == 'text_editor_code_execution_tool_result'
+    )
+    assert text_editor_block['tool_use_id'] == 'srvtool_123'
+    assert text_editor_block['content'] == {
+        'type': 'text_editor_code_execution_create_result',
+        'is_file_update': False,
+    }
+
+
+async def test_anthropic_code_and_bash_tool_error_blocks_no_uploaded_files(allow_model_requests: None):
+    response = completion_message(
+        [
+            BetaCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_code',
+                type='code_execution_tool_result',
+                content=BetaCodeExecutionToolResultError(
+                    type='code_execution_tool_result_error',
+                    error_code='unavailable',
+                ),
+            ),
+            BetaBashCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_bash',
+                type='bash_code_execution_tool_result',
+                content=BetaBashCodeExecutionToolResultError(
+                    type='bash_code_execution_tool_result_error',
+                    error_code='unavailable',
+                ),
+            ),
+            BetaTextBlock(text='done', type='text'),
+        ],
+        BetaUsage(input_tokens=5, output_tokens=5),
+    )
+    mock_client = MockAnthropic.create_mock(response)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    result = await agent.run('hello')
+    parts = result.response.parts
+
+    tool_names = {part.tool_name for part in parts if isinstance(part, BuiltinToolReturnPart)}
+    assert {'code_execution', 'bash_code_execution_tool_result'} <= tool_names
+    assert not any(isinstance(part, UploadedFile) for part in parts)
+
+
+async def test_anthropic_stream_tool_results_with_uploaded_files(allow_model_requests: None):
+    """Test streaming tool result blocks that include uploaded files."""
+    stream_events: list[BetaRawMessageStreamEvent] = [
+        BetaRawMessageStartEvent(
+            type='message_start',
+            message=BetaMessage(
+                id='msg_123',
+                content=[],
+                model='claude-3-5-haiku-123',
+                role='assistant',
+                stop_reason=None,
+                type='message',
+                usage=BetaUsage(input_tokens=5, output_tokens=0),
+            ),
+        ),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=0,
+            content_block=BetaCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_code',
+                type='code_execution_tool_result',
+                content=BetaCodeExecutionResultBlock(
+                    content=[BetaCodeExecutionOutputBlock(type='code_execution_output', file_id='file_code_1')],
+                    return_code=0,
+                    stderr='',
+                    stdout='ok',
+                    type='code_execution_result',
+                ),
+            ),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=0),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=1,
+            content_block=BetaTextEditorCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_text',
+                type='text_editor_code_execution_tool_result',
+                content=BetaTextEditorCodeExecutionCreateResultBlock(
+                    type='text_editor_code_execution_create_result',
+                    is_file_update=False,
+                ),
+            ),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=1),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=2,
+            content_block=BetaBashCodeExecutionToolResultBlock(
+                tool_use_id='srvtool_bash',
+                type='bash_code_execution_tool_result',
+                content=BetaBashCodeExecutionResultBlock(
+                    content=[
+                        BetaBashCodeExecutionOutputBlock(type='bash_code_execution_output', file_id='file_bash_1')
+                    ],
+                    return_code=0,
+                    stderr='',
+                    stdout='ok',
+                    type='bash_code_execution_result',
+                ),
+            ),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=2),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=3,
+            content_block=BetaTextBlock(text='done', type='text'),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=3),
+        BetaRawMessageDeltaEvent(
+            type='message_delta',
+            delta=Delta(stop_reason='end_turn'),
+            usage=BetaMessageDeltaUsage(output_tokens=5),
+        ),
+        BetaRawMessageStopEvent(type='message_stop'),
+    ]
+
+    mock_client = MockAnthropic.create_stream_mock(stream_events)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool()])
+
+    async with agent.run_stream('hello') as result:
+        assert await result.get_output() == 'done'
+
+    messages = result.all_messages()
+    response = messages[-1]
+    assert isinstance(response, ModelResponse)
+
+    uploaded_files = [part for part in response.parts if isinstance(part, UploadedFile)]
+    assert [file.file_id for file in uploaded_files] == ['file_code_1', 'file_bash_1']
+    assert all(file.provider_name == 'anthropic' for file in uploaded_files)
+
+    tool_names = {part.tool_name for part in response.parts if isinstance(part, BuiltinToolReturnPart)}
+    assert {'code_execution', 'text_editor_code_execution', 'bash_code_execution_tool_result'} <= tool_names
+
+
 async def test_anthropic_web_search_tool_stream(allow_model_requests: None, anthropic_api_key: str):
     m = AnthropicModel('claude-sonnet-4-0', provider=AnthropicProvider(api_key=anthropic_api_key))
     agent = Agent(m, instructions='You are a helpful assistant.', builtin_tools=[WebSearchTool()])
@@ -8257,6 +8677,104 @@ async def test_anthropic_cache_messages_real_api(allow_model_requests: None, ant
     assert usage2.output_tokens > 0
 
 
+async def test_anthropic_skills_real_api(allow_model_requests: None, anthropic_api_key: str, vcr: Cassette):
+    """Verify skills are sent in the container payload for real API requests."""
+    model = AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key))
+    agent = Agent(
+        model,
+        builtin_tools=[CodeExecutionTool()],
+        instructions='Create a random one page PDF file use skills.',
+    )
+
+    result = await agent.run(
+        'Create a random one page PDF file use skills.',
+        model_settings=AnthropicModelSettings(
+            anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+        ),
+    )
+    assert result.output == snapshot("""\
+Perfect! I've successfully created a random one-page PDF file using the skills. The PDF includes:
+
+✅ **Random Title** - "Random Generated Document" with a random color
+✅ **Random Date** - Generated date in the subtitle
+✅ **Random Quote** - An inspiring quote selected randomly from a collection
+✅ **Random Geometric Shapes** - Between 3-7 randomly colored circles, rectangles, and lines
+✅ **Random Statistics** - Including random numbers, percentages, temperature, and scores
+✅ **Random Colors** - Used throughout the document for various elements
+✅ **Light Random Background** - Subtle colored background
+✅ **Professional Layout** - With header, dividing line, and footer
+
+The PDF has been created and exported as **random_document.pdf**. Each time you run this, it will generate a different document with:
+- Different colors
+- Different quote
+- Different shapes and positions
+- Different random data values
+
+The file was created using the reportlab library as recommended in the PDF skill guide!\
+""")
+
+    request_body = json.loads(vcr.requests[0].body)  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+    assert request_body['container'] == snapshot({'skills': [{'type': 'anthropic', 'skill_id': 'pdf'}]})
+
+    # Extract uploaded files from the response and verify we can download them
+    uploaded_files = [part for part in result.response.parts if isinstance(part, UploadedFile)]
+    assert len(uploaded_files) > 0, 'Expected at least one UploadedFile from PDF skill'
+    assert all(f.provider_name == 'anthropic' for f in uploaded_files)
+
+    # Download each file and verify content
+    client = AsyncAnthropic(api_key=anthropic_api_key)
+    for uploaded_file in uploaded_files:
+        file_response = await client.beta.files.download(uploaded_file.file_id)
+        content_bytes = await file_response.read()
+        assert len(content_bytes) > 0, f'Expected non-empty content for file {uploaded_file.file_id}'
+        # PDF files start with %PDF
+        assert content_bytes[:4] == b'%PDF', f'Expected PDF file content for {uploaded_file.file_id}'
+
+
+async def test_anthropic_skills_multi_turn(allow_model_requests: None, anthropic_api_key: str, vcr: Cassette):
+    """Test that bash/text_editor execution results are properly sent back in multi-turn conversations."""
+    model = AnthropicModel('claude-sonnet-4-5', provider=AnthropicProvider(api_key=anthropic_api_key))
+    agent = Agent(
+        model,
+        builtin_tools=[CodeExecutionTool()],
+    )
+
+    # First turn: trigger code execution with skills that produces bash/text_editor blocks
+    result = await agent.run(
+        'Write a tiny hello.txt file using bash.',
+        model_settings=AnthropicModelSettings(
+            anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+        ),
+    )
+
+    # Verify first turn produced builtin tool parts
+    return_names = [p.tool_name for p in result.response.parts if isinstance(p, BuiltinToolReturnPart)]
+    assert len(return_names) > 0, (
+        f'Expected builtin tool results, got parts: {[type(p).__name__ for p in result.response.parts]}'
+    )
+
+    # Second turn: send back the conversation history — this exercises the send-back mappings
+    result2 = await agent.run(
+        'What did you just do? Reply in one sentence.',
+        message_history=result.all_messages(),
+        model_settings=AnthropicModelSettings(
+            anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+        ),
+    )
+    assert result2.output  # Model should respond successfully
+
+    # Verify the second request replayed the assistant message with all block types
+    second_request_body = json.loads(vcr.requests[-1].body)  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+    assistant_messages = [m for m in second_request_body['messages'] if m['role'] == 'assistant']
+    assert len(assistant_messages) > 0, 'Expected at least one assistant message in second request'
+
+    # Check that the replayed assistant message contains the expected block types
+    assistant_content = assistant_messages[0]['content']
+    block_types: set[str] = {item['type'] for item in assistant_content if isinstance(item, dict)}
+    # Should have server_tool_use and at least one result type from the first turn
+    assert 'server_tool_use' in block_types, f'Expected server_tool_use in {block_types}'
+
+
 async def test_anthropic_container_setting_explicit(allow_model_requests: None):
     """Test that anthropic_container setting passes explicit container config to API."""
     c = completion_message([BetaTextBlock(text='world', type='text')], BetaUsage(input_tokens=5, output_tokens=10))
@@ -8379,6 +8897,172 @@ async def test_anthropic_container_id_from_stream_response(allow_model_requests:
     assert model_response.provider_details is not None
     assert model_response.provider_details.get('container_id') == 'container_from_stream'
     assert model_response.provider_details.get('finish_reason') == 'end_turn'
+
+
+async def test_anthropic_skills_setting(allow_model_requests: None):
+    """Test that anthropic_skills setting passes skills to container parameter."""
+    c = completion_message([BetaTextBlock(text='world', type='text')], BetaUsage(input_tokens=5, output_tokens=10))
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool()])
+
+    await agent.run(
+        'hello',
+        model_settings=AnthropicModelSettings(
+            anthropic_skills=[
+                {'type': 'anthropic', 'skill_id': 'pptx', 'version': 'latest'},
+                {'type': 'anthropic', 'skill_id': 'xlsx'},
+            ]
+        ),
+    )
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    assert completion_kwargs['container'] == BetaContainerParams(
+        skills=[
+            {'type': 'anthropic', 'skill_id': 'pptx', 'version': 'latest'},
+            {'type': 'anthropic', 'skill_id': 'xlsx'},
+        ]
+    )
+    # Check that all required skills betas are included
+    assert 'skills-2025-10-02' in completion_kwargs['betas']
+    assert 'code-execution-2025-08-25' in completion_kwargs['betas']
+    assert 'files-api-2025-04-14' in completion_kwargs['betas']
+
+
+async def test_anthropic_skills_with_container_id(allow_model_requests: None):
+    """Test that skills are merged with container_id from message history."""
+    c = completion_message([BetaTextBlock(text='world', type='text')], BetaUsage(input_tokens=5, output_tokens=10))
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool()])
+
+    # Create message history with container_id
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content='hello')]),
+        ModelResponse(
+            parts=[TextPart(content='world')],
+            provider_name='anthropic',
+            provider_details={'container_id': 'container_from_history'},
+        ),
+    ]
+
+    await agent.run(
+        'follow up',
+        message_history=history,
+        model_settings=AnthropicModelSettings(anthropic_skills=[{'type': 'anthropic', 'skill_id': 'docx'}]),
+    )
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    assert completion_kwargs['container'] == BetaContainerParams(
+        id='container_from_history',
+        skills=[{'type': 'anthropic', 'skill_id': 'docx'}],
+    )
+
+
+async def test_anthropic_skills_requires_code_execution_tool(allow_model_requests: None):
+    """Test that skills raise UserError without CodeExecutionTool."""
+    c = completion_message([BetaTextBlock(text='world', type='text')], BetaUsage(input_tokens=5, output_tokens=10))
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)  # No CodeExecutionTool
+
+    with pytest.raises(UserError) as exc_info:
+        await agent.run(
+            'hello',
+            model_settings=AnthropicModelSettings(anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pptx'}]),
+        )
+
+    assert 'Skills require the code execution tool' in str(exc_info.value)
+    assert 'CodeExecutionTool()' in str(exc_info.value)
+
+
+async def test_anthropic_skills_max_limit(allow_model_requests: None):
+    """Test that more than 8 skills raises UserError."""
+    c = completion_message([BetaTextBlock(text='world', type='text')], BetaUsage(input_tokens=5, output_tokens=10))
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool()])
+
+    with pytest.raises(UserError) as exc_info:
+        await agent.run(
+            'hello',
+            model_settings=AnthropicModelSettings(
+                anthropic_skills=[{'type': 'anthropic', 'skill_id': f'skill_{i}'} for i in range(9)]
+            ),
+        )
+
+    assert 'Maximum of 8 skills allowed' in str(exc_info.value)
+    assert 'got 9' in str(exc_info.value)
+
+
+async def test_anthropic_skills_with_explicit_container(allow_model_requests: None):
+    """Test that skills are merged with explicit container config."""
+    c = completion_message([BetaTextBlock(text='world', type='text')], BetaUsage(input_tokens=5, output_tokens=10))
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool()])
+
+    await agent.run(
+        'hello',
+        model_settings=AnthropicModelSettings(
+            anthropic_container={'id': 'container_explicit'},
+            anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+        ),
+    )
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    assert completion_kwargs['container'] == BetaContainerParams(
+        id='container_explicit',
+        skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+    )
+
+
+async def test_anthropic_skills_with_container_false(allow_model_requests: None):
+    """Test that skills with anthropic_container=False creates fresh container with skills only."""
+    c = completion_message([BetaTextBlock(text='world', type='text')], BetaUsage(input_tokens=5, output_tokens=10))
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool()])
+
+    # Create message history with container_id that should be ignored
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content='hello')]),
+        ModelResponse(
+            parts=[TextPart(content='world')],
+            provider_name='anthropic',
+            provider_details={'container_id': 'container_should_be_ignored'},
+        ),
+    ]
+
+    await agent.run(
+        'follow up',
+        message_history=history,
+        model_settings=AnthropicModelSettings(
+            anthropic_container=False,
+            anthropic_skills=[{'type': 'custom', 'skill_id': 'my_skill'}],
+        ),
+    )
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    # Should have skills but no container ID
+    assert completion_kwargs['container'] == BetaContainerParams(skills=[{'type': 'custom', 'skill_id': 'my_skill'}])
+
+
+def test_uploaded_file_in_response_parts():
+    """Test that UploadedFile parts can be included in and filtered from ModelResponse."""
+    response = ModelResponse(
+        parts=[
+            TextPart(content='Created your file'),
+            UploadedFile(file_id='file_abc123', provider_name='anthropic'),
+            UploadedFile(file_id='file_xyz789', provider_name='anthropic'),
+        ],
+    )
+
+    uploaded_files = [part for part in response.parts if isinstance(part, UploadedFile)]
+    assert len(uploaded_files) == 2
+    assert uploaded_files[0].file_id == 'file_abc123'
+    assert uploaded_files[1].file_id == 'file_xyz789'
+    assert all(f.provider_name == 'anthropic' for f in uploaded_files)
 
 
 async def test_anthropic_system_prompts_and_instructions_ordering():
