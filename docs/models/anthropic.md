@@ -147,6 +147,38 @@ agent = Agent(model)
 
 See [Anthropic's Microsoft Foundry documentation](https://platform.claude.com/docs/en/build-with-claude/claude-in-microsoft-foundry) for setup instructions including Entra ID authentication.
 
+## Skills
+
+Anthropic skills extend the code execution environment with specialized instructions, scripts, and resources.
+To enable skills, include `CodeExecutionTool()` in `builtin_tools` and pass
+[`AnthropicModelSettings.anthropic_skills`][pydantic_ai.models.anthropic.AnthropicModelSettings.anthropic_skills].
+Pydantic AI will add the required `skills-2025-10-02` beta automatically.
+
+```python {test="skip"}
+from pydantic_ai import Agent
+from pydantic_ai.builtin_tools import CodeExecutionTool
+from pydantic_ai.models.anthropic import AnthropicModelSettings
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-5',
+    builtin_tools=[CodeExecutionTool()],
+)
+
+result = agent.run_sync(
+    'Summarize the attached PDF.',
+    model_settings=AnthropicModelSettings(
+        anthropic_skills=[{'type': 'anthropic', 'skill_id': 'pdf'}],
+    ),
+)
+print(result.output)
+```
+
+You can include up to 8 skills per request. Managed skill IDs include `pptx`, `xlsx`, `docx`, and `pdf`.
+For custom skills, use `type='custom'` with your uploaded skill ID.
+See [Anthropic's skills documentation](https://docs.anthropic.com/en/docs/agents-and-tools/agent-skills/overview) for details.
+
+To load files into the code execution sandbox (e.g., for data analysis), use [`SandboxFile`](../input.md#sandbox-files) instead of [`UploadedFile`](../input.md#uploaded-files). `SandboxFile` maps to Anthropic's `container_upload` content block, making files accessible on the sandbox filesystem.
+
 ## Prompt Caching
 
 Anthropic supports [prompt caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching) to reduce costs by caching parts of your prompts. Pydantic AI provides four ways to use prompt caching:
@@ -347,3 +379,14 @@ print(f'Cache read tokens: {usage.cache_read_tokens}')
 - The cache point created by `anthropic_cache_messages` is **always preserved** (as it's the newest message cache point)
 - Additional `CachePoint` markers in messages are removed from oldest to newest when the limit is exceeded
 - This ensures critical caching (instructions/tools) is maintained while still benefiting from message-level caching
+
+## Pause Turn Handling
+
+When using server-side tools like [`WebSearchTool`](../builtin-tools.md#web-search-tool) or skills, Anthropic may pause
+mid-turn if operations take a long time (e.g. performing many web searches in sequence). This is indicated by the
+[`pause_turn` stop reason](https://docs.anthropic.com/en/api/handling-stop-reasons#3-implement-retry-logic-for-pause-turn).
+
+Pydantic AI handles this automatically by continuing the conversation with a follow-up request. No user action
+is required. Continuations are capped internally at a high default to prevent unbounded requests.
+
+This also works correctly with [`FallbackModel`](../multi-model-agents.md#fallback-model) — when a model pauses mid-turn, continuation requests are pinned to the same model rather than restarting the fallback chain.

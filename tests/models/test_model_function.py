@@ -21,9 +21,11 @@ from pydantic_ai import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.messages import UploadedFile
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.result import RunUsage
+from pydantic_ai.run import AgentRunResult
 from pydantic_ai.usage import RequestUsage
 
 from .._inline_snapshot import snapshot
@@ -60,9 +62,18 @@ async def return_last(messages: list[ModelMessage], _: AgentInfo) -> ModelRespon
     return ModelResponse(parts=[TextPart(' '.join(f'{k}={v!r}' for k, v in response.items()))])
 
 
+def return_with_uploaded_file(_messages: list[ModelMessage], _: AgentInfo) -> ModelResponse:
+    return ModelResponse(
+        parts=[
+            TextPart('done'),
+            UploadedFile(file_id='file-abc123', provider_name='anthropic'),
+        ]
+    )
+
+
 def test_simple():
     agent = Agent(FunctionModel(return_last))
-    result = agent.run_sync('Hello')
+    result: AgentRunResult[str] = agent.run_sync('Hello')
     assert result.output == snapshot("content='Hello' part_kind='user-prompt' message_count=1")
     assert result.all_messages() == snapshot(
         [
@@ -111,6 +122,13 @@ def test_simple():
             ),
         ]
     )
+
+
+def test_usage_estimate_includes_uploaded_file():
+    agent = Agent(FunctionModel(return_with_uploaded_file))
+    result = agent.run_sync('hello')
+    assert result.output == 'done'
+    assert result.usage() == snapshot(RunUsage(requests=1, input_tokens=51, output_tokens=2))
 
 
 async def weather_model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:  # pragma: lax no cover
