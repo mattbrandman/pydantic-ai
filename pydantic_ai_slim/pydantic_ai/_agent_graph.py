@@ -1010,8 +1010,14 @@ class ContinueRequestNode(AgentNode[DepsT, NodeRunEndT]):
         if existing.model_name and new.model_name and existing.model_name != new.model_name:
             return new
 
-        # Same model, different response → accumulate parts and sum usage
-        merged_usage = existing.usage + new.usage
+        # Same model, different response → accumulate parts and sum usage.
+        # When the new response has openai_last_sequence_number, it used starting_after for
+        # streaming continuation — its usage is the total for the entire response (from
+        # ResponseCompletedEvent), not incremental, so use it directly instead of summing.
+        if (new.provider_details or {}).get('openai_last_sequence_number') is not None:
+            merged_usage = new.usage
+        else:
+            merged_usage = existing.usage + new.usage
         return replace(
             new,
             parts=[*existing.parts, *new.parts],
