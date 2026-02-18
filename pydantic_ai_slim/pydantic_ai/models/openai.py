@@ -1661,7 +1661,6 @@ class OpenAIResponsesModel(Model):
             model_name = expected_model_name or self.model_name
             provider_timestamp = None
             initial_state = 'suspended'
-
         streamed_response = OpenAIResponsesStreamedResponse(
             model_request_parameters=model_request_parameters,
             _model_name=model_name,
@@ -3015,13 +3014,11 @@ class OpenAIResponsesStreamedResponse(StreamedResponse):
         if self._refusal_text:
             self.provider_details = {**(self.provider_details or {}), 'refusal': self._refusal_text}
 
-        # This is used to resume suspended background streams with `starting_after`.
-        if self.state == 'suspended' and self._last_sequence_number is not None:
+        if self._last_sequence_number is not None:
             self.provider_details = {
                 **(self.provider_details or {}),
                 'openai_last_sequence_number': self._last_sequence_number,
             }
-
     def _map_usage(self, response: responses.Response) -> usage.RequestUsage:
         return _map_usage(response, self._provider_name, self._provider_url, self.model_name)
 

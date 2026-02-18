@@ -10338,7 +10338,11 @@ async def test_background_mode_streaming_vcr(allow_model_requests: None, openai_
                 timestamp=IsDatetime(),
                 provider_name='openai',
                 provider_url='https://api.openai.com/v1/',
-                provider_details={'timestamp': IsDatetime(), 'finish_reason': 'completed'},
+                provider_details={
+                    'timestamp': IsDatetime(),
+                    'finish_reason': 'completed',
+                    'openai_last_sequence_number': 16,
+                },
                 provider_response_id='resp_0da443d9ee8333600069950a0635d88196b2d9243b08e8cc01',
                 finish_reason='stop',
                 run_id=IsStr(),
