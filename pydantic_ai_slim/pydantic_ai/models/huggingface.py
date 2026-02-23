@@ -28,7 +28,6 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
-    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -449,9 +448,11 @@ class HuggingFaceModel(Model):
                 elif isinstance(item, VideoUrl):
                     raise NotImplementedError('VideoUrl is not supported for Hugging Face')
                 elif isinstance(item, UploadedFile):
+                    if item.target != 'message':
+                        raise NotImplementedError(
+                            'UploadedFile `target` values including `container` are not supported for Hugging Face'
+                        )
                     raise NotImplementedError('UploadedFile is not supported for Hugging Face')
-                elif isinstance(item, SandboxFile):
-                    raise NotImplementedError('SandboxFile is not supported for Hugging Face')
                 elif isinstance(item, CachePoint):
                     # Hugging Face doesn't support prompt caching via CachePoint
                     pass

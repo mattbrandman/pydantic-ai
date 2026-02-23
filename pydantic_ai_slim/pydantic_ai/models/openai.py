@@ -48,7 +48,6 @@ from ..messages import (
     ModelResponseStreamEvent,
     PartStartEvent,
     RetryPromptPart,
-    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -173,6 +172,32 @@ _OPENAI_ASPECT_RATIO_TO_SIZE: dict[ImageAspectRatio, Literal['1024x1024', '1024x
 
 _OPENAI_IMAGE_SIZE = Literal['auto', '1024x1024', '1024x1536', '1536x1024']
 _OPENAI_IMAGE_SIZES: tuple[_OPENAI_IMAGE_SIZE, ...] = _utils.get_args(_OPENAI_IMAGE_SIZE)
+
+
+def _reorder_uploaded_file_reference_text(items: Sequence[Any]) -> list[Any]:
+    """Move auto-generated file reference text after UploadedFile for OpenAI providers.
+
+    `_agent_graph._call_tool` generates pairs in the form:
+    `['This is file <identifier>:', UploadedFile(...)]`.
+    OpenAI works better with the file content before the reference text.
+    """
+    reordered: list[Any] = []
+    i = 0
+    while i < len(items):
+        item = items[i]
+        if i + 1 < len(items):
+            next_item = items[i + 1]
+            if (
+                isinstance(item, str)
+                and isinstance(next_item, UploadedFile)
+                and item == f'This is file {next_item.identifier}:'
+            ):
+                reordered.extend((next_item, item))
+                i += 2
+                continue
+        reordered.append(item)
+        i += 1
+    return reordered
 
 
 class _AzureContentFilterResultDetail(BaseModel):
@@ -1057,7 +1082,7 @@ class OpenAIChatModel(Model):
             # OpenAI doesn't return built-in tool calls
             pass
 
-        def _map_response_file_part(self, item: FilePart | UploadedFile | SandboxFile) -> None:
+        def _map_response_file_part(self, item: FilePart | UploadedFile) -> None:
             """Maps a `FilePart` or `UploadedFile` to the response context.
 
             This method serves as a hook that can be overridden by subclasses
@@ -1255,15 +1280,7 @@ class OpenAIChatModel(Model):
 
     async def _map_content_item(
         self,
-        item: str
-        | ImageUrl
-        | BinaryContent
-        | AudioUrl
-        | DocumentUrl
-        | VideoUrl
-        | UploadedFile
-        | SandboxFile
-        | CachePoint,
+        item: str | ImageUrl | BinaryContent | AudioUrl | DocumentUrl | VideoUrl | UploadedFile | CachePoint,
     ) -> ChatCompletionContentPartParam | None:
         """Map a single content item to a chat completion content part, or None to filter it out."""
         if isinstance(item, str):
@@ -1285,12 +1302,14 @@ class OpenAIChatModel(Model):
                     f'UploadedFile with `provider_name={item.provider_name!r}` cannot be used with OpenAIChatModel. '
                     f'Expected `provider_name` to be `{self.system!r}`.'
                 )
+            if item.target != 'message':
+                raise UserError(
+                    'UploadedFile `target` values including `container` are not yet supported by OpenAIChatModel.'
+                )
             return File(
                 file=FileFile(file_id=item.file_id),
                 type='file',
             )
-        elif isinstance(item, SandboxFile):
-            raise UserError('SandboxFile is not yet supported by OpenAIChatModel.')
         elif isinstance(item, CachePoint):
             # OpenAI doesn't support prompt caching via CachePoint, so we filter it out
             return None
@@ -1303,7 +1322,7 @@ class OpenAIChatModel(Model):
             content = part.content
         else:
             content = []
-            for item in part.content:
+            for item in _reorder_uploaded_file_reference_text(part.content):
                 mapped_item = await self._map_content_item(item)
                 if mapped_item is not None:
                     content.append(mapped_item)
@@ -2175,7 +2194,7 @@ class OpenAIResponsesModel(Model):
             content = part.content
         else:
             content = []
-            for item in part.content:
+            for item in _reorder_uploaded_file_reference_text(part.content):
                 if isinstance(item, str):
                     content.append(responses.ResponseInputTextParam(text=item, type='input_text'))
                 elif isinstance(item, BinaryContent):
@@ -2250,14 +2269,16 @@ class OpenAIResponsesModel(Model):
                             f'UploadedFile with `provider_name={item.provider_name!r}` cannot be used with OpenAIResponsesModel. '
                             f'Expected `provider_name` to be `{self.system!r}`.'
                         )
+                    if item.target != 'message':
+                        raise UserError(
+                            'UploadedFile `target` values including `container` are not yet supported by OpenAIResponsesModel.'
+                        )
                     content.append(
                         responses.ResponseInputFileParam(
                             type='input_file',
                             file_id=item.file_id,
                         )
                     )
-                elif isinstance(item, SandboxFile):
-                    raise UserError('SandboxFile is not yet supported by OpenAIResponsesModel.')
                 elif isinstance(item, CachePoint):
                     # OpenAI doesn't support prompt caching via CachePoint, so we filter it out
                     pass

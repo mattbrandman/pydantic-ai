@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Literal, cast, overload
 
+from anthropic.types.beta import BetaContainerUploadBlock
 from pydantic import TypeAdapter
 from typing_extensions import Required, TypedDict, assert_never
 
@@ -37,7 +38,6 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
-    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -833,6 +833,9 @@ class AnthropicModel(Model):
         model_settings: AnthropicModelSettings,
     ) -> tuple[str | list[BetaTextBlockParam], list[BetaMessageParam]]:
         """Just maps a `pydantic_ai.Message` to a `anthropic.types.MessageParam`."""
+        has_code_execution_tool = any(
+            isinstance(tool, CodeExecutionTool) for tool in model_request_parameters.builtin_tools
+        )
         system_prompt_parts: list[str] = []
         anthropic_messages: list[BetaMessageParam] = []
         for m in messages:
@@ -842,7 +845,9 @@ class AnthropicModel(Model):
                     if isinstance(request_part, SystemPromptPart):
                         system_prompt_parts.append(request_part.content)
                     elif isinstance(request_part, UserPromptPart):
-                        async for content in self._map_user_prompt(request_part):
+                        async for content in self._map_user_prompt(
+                            request_part, has_code_execution_tool=has_code_execution_tool
+                        ):
                             if isinstance(content, CachePoint):
                                 self._add_cache_control_to_last_param(user_content_params, ttl=content.ttl)
                             else:
@@ -1046,7 +1051,7 @@ class AnthropicModel(Model):
                                         **response_part.content,  # pyright: ignore[reportUnknownMemberType]
                                     )
                                 )
-                    elif isinstance(response_part, (FilePart, UploadedFile, SandboxFile)):  # pragma: no cover
+                    elif isinstance(response_part, (FilePart, UploadedFile)):  # pragma: no cover
                         # Files/uploads in responses are informational; the BuiltinToolReturnPart
                         # already contains the file info for the model.
                         pass
@@ -1235,6 +1240,8 @@ class AnthropicModel(Model):
     async def _map_user_prompt(  # noqa: C901
         self,
         part: UserPromptPart,
+        *,
+        has_code_execution_tool: bool,
     ) -> AsyncGenerator[BetaContentBlockParam | CachePoint]:
         if isinstance(part.content, str):
             if part.content:  # Only yield non-empty text
@@ -1280,28 +1287,30 @@ class AnthropicModel(Model):
                             f'UploadedFile with `provider_name={item.provider_name!r}` cannot be used with AnthropicModel. '
                             f'Expected `provider_name` to be `{self.system!r}`.'
                         )
-                    if item.media_type.startswith('image/'):
-                        yield BetaImageBlockParam(
-                            source=BetaFileImageSourceParam(file_id=item.file_id, type='file'),
-                            type='image',
-                        )
-                    elif item.media_type.startswith(('text/', 'application/')):
-                        yield BetaRequestDocumentBlockParam(
-                            source=BetaFileDocumentSourceParam(file_id=item.file_id, type='file'),
-                            type='document',
-                        )
-                    else:
-                        raise UserError(
-                            f'Unsupported media type {item.media_type!r} for Anthropic file upload. '
-                            'Only image and document (text/application) types are supported.'
-                        )
-                elif isinstance(item, SandboxFile):
-                    if item.provider_name != self.system:
-                        raise UserError(
-                            f'SandboxFile with `provider_name={item.provider_name!r}` cannot be used with AnthropicModel. '
-                            f'Expected `provider_name` to be `{self.system!r}`.'
-                        )
-                    yield cast(BetaContentBlockParam, {'type': 'container_upload', 'file_id': item.file_id})
+                    if item.target in ('message', 'both'):
+                        if item.media_type.startswith('image/'):
+                            yield BetaImageBlockParam(
+                                source=BetaFileImageSourceParam(file_id=item.file_id, type='file'),
+                                type='image',
+                            )
+                        elif item.media_type.startswith(('text/', 'application/')):
+                            yield BetaRequestDocumentBlockParam(
+                                source=BetaFileDocumentSourceParam(file_id=item.file_id, type='file'),
+                                type='document',
+                            )
+                        else:
+                            raise UserError(
+                                f'Unsupported media type {item.media_type!r} for Anthropic file upload. '
+                                'Only image and document (text/application) types are supported.'
+                            )
+                    if item.target in ('container', 'both'):
+                        if not has_code_execution_tool:
+                            raise UserError(
+                                'UploadedFile with `target` including `container` requires the code execution tool. '
+                                'Add `CodeExecutionTool()` to `builtin_tools`.'
+                            )
+
+                        yield BetaContainerUploadBlock(file_id=item.file_id, type='container_upload')
                 else:
                     raise RuntimeError(f'Unsupported content type: {type(item)}')  # pragma: no cover
 

@@ -3846,7 +3846,11 @@ async def test_adapter_dump_messages_with_uploaded_file_response():
                         'filename': None,
                         'url': 'file-abc123',
                         'provider_metadata': {
-                            'pydantic_ai': {'uploaded_file_id': 'file-abc123', 'provider_name': 'openai'}
+                            'pydantic_ai': {
+                                'uploaded_file_id': 'file-abc123',
+                                'provider_name': 'openai',
+                                'target': 'message',
+                            }
                         },
                     }
                 ],
@@ -4369,7 +4373,9 @@ async def test_convert_user_prompt_part_uploaded_file():
             FileUIPart(
                 media_type='application/pdf',
                 url='file-abc123',
-                provider_metadata={'pydantic_ai': {'file_id': 'file-abc123', 'provider_name': 'openai'}},
+                provider_metadata={
+                    'pydantic_ai': {'file_id': 'file-abc123', 'provider_name': 'openai', 'target': 'message'}
+                },
             ),
         ]
     )
@@ -4530,6 +4536,43 @@ async def test_adapter_load_messages_file_url_without_metadata():
             )
         ]
     )
+
+
+async def test_adapter_dump_messages_skips_container_only_uploaded_file_response():
+    messages = [
+        ModelRequest(parts=[UserPromptPart(content='Here is a sandbox file')]),
+        ModelResponse(
+            parts=[
+                UploadedFile(file_id='file-container-123', provider_name='anthropic', target='container'),
+            ]
+        ),
+    ]
+
+    ui_messages = VercelAIAdapter.dump_messages(messages)
+    ui_message_dicts = [msg.model_dump() for msg in ui_messages]
+
+    assert ui_message_dicts == snapshot(
+        [
+            {
+                'id': IsStr(),
+                'role': 'user',
+                'metadata': None,
+                'parts': [
+                    {'type': 'text', 'text': 'Here is a sandbox file', 'state': 'done', 'provider_metadata': None},
+                ],
+            }
+        ]
+    )
+
+
+async def test_convert_user_prompt_part_skips_container_only_uploaded_file():
+    from pydantic_ai.ui.vercel_ai._adapter import _convert_user_prompt_part  # pyright: ignore[reportPrivateUsage]
+
+    part = UserPromptPart(
+        content=[UploadedFile(file_id='file-container-123', provider_name='anthropic', target='container')]
+    )
+    ui_parts = _convert_user_prompt_part(part)
+    assert ui_parts == snapshot([])
 
 
 async def test_adapter_dump_messages_thinking_with_metadata():

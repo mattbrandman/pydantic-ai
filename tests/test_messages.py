@@ -508,6 +508,7 @@ def test_file_part_has_content():
 def test_uploaded_file_has_content():
     uploaded_file = UploadedFile(file_id='file-abc123', provider_name='anthropic')
     assert uploaded_file.has_content()
+    assert uploaded_file.target == 'message'
 
 
 def test_file_part_serialization_roundtrip():
@@ -886,6 +887,30 @@ def test_uploaded_file_in_otel_message_parts():
         [{'type': 'file', 'modality': 'video', 'file_id': 'video-123', 'mime_type': 'video/mp4'}]
     )
 
+    # Test container target - should use sandbox modality
+    part_container = UserPromptPart(
+        content=[UploadedFile(file_id='file-container-123', provider_name='anthropic', target='container')]
+    )
+    otel_parts_container = part_container.otel_message_parts(settings)
+    assert otel_parts_container == snapshot([{'type': 'file', 'modality': 'sandbox', 'file_id': 'file-container-123'}])
+
+    # Test both target - should emit both message and sandbox file parts
+    part_both = UserPromptPart(
+        content=[UploadedFile(file_id='file-both-123', provider_name='anthropic', target='both')]
+    )
+    otel_parts_both = part_both.otel_message_parts(settings)
+    assert otel_parts_both == snapshot(
+        [
+            {
+                'type': 'file',
+                'modality': 'document',
+                'file_id': 'file-both-123',
+                'mime_type': 'application/octet-stream',
+            },
+            {'type': 'file', 'modality': 'sandbox', 'file_id': 'file-both-123'},
+        ]
+    )
+
     # Test without include_content (should have type, modality, and mime_type but not file_id)
     settings_no_content = InstrumentationSettings(include_content=False)
     otel_parts_no_content = part.otel_message_parts(settings_no_content)
@@ -949,6 +974,70 @@ def test_uploaded_file_custom_identifier_and_media_type_roundtrip():
     assert uploaded.identifier == 'my-id'
     assert uploaded.media_type == 'image/png'
     assert deserialized == messages
+
+
+def test_legacy_sandbox_file_deserializes_to_uploaded_file():
+    messages_data = [
+        {
+            'parts': [
+                {
+                    'content': [
+                        'use this in code execution',
+                        {
+                            'kind': 'sandbox-file',
+                            'file_id': 'file-legacy-123',
+                            'provider_name': 'anthropic',
+                            'identifier': 'legacy-id',
+                        },
+                    ],
+                    'timestamp': '2026-02-03T22:25:50Z',
+                    'part_kind': 'user-prompt',
+                }
+            ],
+            'kind': 'request',
+        }
+    ]
+
+    messages = ModelMessagesTypeAdapter.validate_python(messages_data)
+    part = messages[0].parts[0]
+    assert isinstance(part, UserPromptPart)
+    uploaded = part.content[1]
+    assert isinstance(uploaded, UploadedFile)
+    assert uploaded.target == 'container'
+    assert uploaded.kind == 'uploaded-file'
+    assert uploaded.identifier == 'legacy-id'
+
+    reserialized = ModelMessagesTypeAdapter.dump_python(messages, mode='json')
+    assert reserialized == snapshot(
+        [
+            {
+                'parts': [
+                    {
+                        'content': [
+                            'use this in code execution',
+                            {
+                                'file_id': 'file-legacy-123',
+                                'provider_name': 'anthropic',
+                                'vendor_metadata': None,
+                                'target': 'container',
+                                'kind': 'uploaded-file',
+                                'part_kind': 'uploaded-file',
+                                'media_type': 'application/octet-stream',
+                                'identifier': 'legacy-id',
+                            },
+                        ],
+                        'timestamp': '2026-02-03T22:25:50Z',
+                        'part_kind': 'user-prompt',
+                    }
+                ],
+                'timestamp': None,
+                'instructions': None,
+                'kind': 'request',
+                'run_id': None,
+                'metadata': None,
+            }
+        ]
+    )
 
 
 def test_tool_return_content_with_url_field_not_coerced_to_image_url():

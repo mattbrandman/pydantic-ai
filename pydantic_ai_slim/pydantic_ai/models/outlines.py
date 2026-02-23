@@ -30,7 +30,6 @@ from ..messages import (
     ModelResponsePart,
     ModelResponseStreamEvent,
     RetryPromptPart,
-    SandboxFile,
     SystemPromptPart,
     TextPart,
     ThinkingPart,
@@ -453,9 +452,11 @@ class OutlinesModel(Model):
                                     image = self._create_PIL_image(item.data, item.media_type)
                                     outlines_input.append(Image(image))
                                 elif isinstance(item, UploadedFile):
+                                    if item.target != 'message':
+                                        raise NotImplementedError(
+                                            'UploadedFile `target` values including `container` are not supported by Outlines.'
+                                        )
                                     raise NotImplementedError('UploadedFile is not supported by Outlines.')
-                                elif isinstance(item, SandboxFile):
-                                    raise NotImplementedError('SandboxFile is not supported by Outlines.')
                                 else:
                                     raise UserError(
                                         'Each element of the content sequence must be a string, an `ImageUrl`'
@@ -489,7 +490,7 @@ class OutlinesModel(Model):
                             raise UserError(
                                 'File parts other than `BinaryImage` are not supported for Outlines models yet.'
                             )
-                    elif isinstance(part, UploadedFile | SandboxFile):  # pragma: no cover
+                    elif isinstance(part, UploadedFile):  # pragma: no cover
                         # Uploaded file references are not sent back to models that don't support them.
                         pass
                     else:

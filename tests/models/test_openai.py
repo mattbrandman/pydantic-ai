@@ -1541,6 +1541,108 @@ async def test_uploaded_file_responses_model(allow_model_requests: None) -> None
     )
 
 
+async def test_uploaded_file_container_target_chat_not_supported(allow_model_requests: None) -> None:
+    c = completion_message(
+        ChatCompletionMessage(content='Should not reach here.', role='assistant'),
+    )
+    mock_client = MockOpenAI.create_mock(c)
+    m = OpenAIChatModel('gpt-4o', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m)
+
+    with pytest.raises(UserError, match='target` values including `container` are not yet supported'):
+        await agent.run(
+            [
+                'Analyze this file',
+                UploadedFile(file_id='file-abc123', provider_name='openai', target='container'),
+            ]
+        )
+
+
+async def test_uploaded_file_container_target_responses_not_supported(allow_model_requests: None) -> None:
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    output_item = ResponseOutputMessage(
+        id='msg_123',
+        type='message',
+        role='assistant',
+        status='completed',
+        content=[ResponseOutputText(text='Should not reach here.', type='output_text', annotations=[])],
+    )
+    r = response_message([output_item])
+    mock_client = MockOpenAIResponses.create_mock(r)
+    m = OpenAIResponsesModel('gpt-4o', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m)
+
+    with pytest.raises(UserError, match='target` values including `container` are not yet supported'):
+        await agent.run(
+            [
+                'Analyze this file',
+                UploadedFile(file_id='file-abc123', provider_name='openai', target='container'),
+            ]
+        )
+
+
+async def test_uploaded_file_reference_text_is_reordered_for_chat(allow_model_requests: None) -> None:
+    c = completion_message(
+        ChatCompletionMessage(content='The file was processed.', role='assistant'),
+    )
+    mock_client = MockOpenAI.create_mock(c)
+    m = OpenAIChatModel('gpt-4o', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m)
+
+    file = UploadedFile(file_id='file-abc123', provider_name='openai', identifier='abc123')
+    result = await agent.run(['This is file abc123:', file])
+    assert result.output == 'The file was processed.'
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    messages = completion_kwargs['messages']
+    assert messages == snapshot(
+        [
+            {
+                'role': 'user',
+                'content': [
+                    {'file': {'file_id': 'file-abc123'}, 'type': 'file'},
+                    {'text': 'This is file abc123:', 'type': 'text'},
+                ],
+            }
+        ]
+    )
+
+
+async def test_uploaded_file_reference_text_is_reordered_for_responses(allow_model_requests: None) -> None:
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    output_item = ResponseOutputMessage(
+        id='msg_123',
+        type='message',
+        role='assistant',
+        status='completed',
+        content=[ResponseOutputText(text='The file was processed.', type='output_text', annotations=[])],
+    )
+    r = response_message([output_item])
+    mock_client = MockOpenAIResponses.create_mock(r)
+    m = OpenAIResponsesModel('gpt-4o', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m)
+
+    file = UploadedFile(file_id='file-xyz789', provider_name='openai', identifier='xyz789')
+    result = await agent.run(['This is file xyz789:', file])
+    assert result.output == 'The file was processed.'
+
+    responses_kwargs = get_mock_responses_kwargs(mock_client)[0]
+    input_content = responses_kwargs['input']
+    assert input_content == snapshot(
+        [
+            {
+                'role': 'user',
+                'content': [
+                    {'file_id': 'file-xyz789', 'type': 'input_file'},
+                    {'text': 'This is file xyz789:', 'type': 'input_text'},
+                ],
+            }
+        ]
+    )
+
+
 async def test_uploaded_file_wrong_provider_chat(allow_model_requests: None) -> None:
     """Test that UploadedFile with wrong provider raises an error in OpenAIChatModel."""
     c = completion_message(

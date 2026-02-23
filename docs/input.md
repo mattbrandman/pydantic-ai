@@ -352,37 +352,32 @@ async def main():
 asyncio.run(main())
 ```
 
-## Sandbox Files
+## UploadedFile Targets
 
-Use [`SandboxFile`][pydantic_ai.messages.SandboxFile] to load a file into a provider's code execution sandbox so that code can read and process it.
+Use [`UploadedFile`][pydantic_ai.messages.UploadedFile] with `target` to control where file IDs are sent:
 
-Unlike [`UploadedFile`][pydantic_ai.messages.UploadedFile], which makes files visible to the model as image or document content, `SandboxFile` makes files accessible on the sandbox filesystem for use by [code execution tools](builtin-tools.md#code-execution-tool).
-
-!!! tip "When to use `SandboxFile` vs `UploadedFile`"
-    Use `UploadedFile` when you want the **model** to see the file (e.g., summarize a PDF, describe an image). Use `SandboxFile` when you want **code** to process the file (e.g., parse a CSV with pandas, run analysis on a dataset).
+- `target='message'` (default): file is visible to the model as message content.
+- `target='container'`: file is loaded into a code execution container.
+- `target='both'`: send both message content and container upload.
 
 ### Supported Models
 
-| Model | Support |
-|-------|---------|
-| [`AnthropicModel`][pydantic_ai.models.anthropic.AnthropicModel] | ✅ via [`container_upload`](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/code-execution) |
-| Other models | ❌ Not yet supported |
+| Model | `target='message'` | `target` includes `container` |
+|-------|--------------------|-------------------------------|
+| [`AnthropicModel`][pydantic_ai.models.anthropic.AnthropicModel] | ✅ | ✅ via [`container_upload`](https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/code-execution) |
+| Other models | ✅ (provider-dependent) | ❌ Not yet supported |
 
-### Provider Name Requirement
+### Anthropic Container Uploads
 
-Like `UploadedFile`, `SandboxFile` requires a `provider_name` since file IDs are provider-specific. Use [`model.system`][pydantic_ai.models.Model.system] to get the correct provider name dynamically.
-
-### Anthropic
-
-Upload a file via the [Anthropic Files API](https://docs.anthropic.com/en/docs/build-with-claude/files), then reference it with `SandboxFile` to make it available in the code execution sandbox.
+Upload a file via the [Anthropic Files API](https://docs.anthropic.com/en/docs/build-with-claude/files), then use `UploadedFile(..., target='container')` to make it available in code execution.
 
 !!! note "Requires Code Execution"
-    `SandboxFile` requires [`CodeExecutionTool`][pydantic_ai.builtin_tools.CodeExecutionTool] to be enabled, since the file is loaded into the code execution container.
+    `UploadedFile` with `target='container'` or `target='both'` requires [`CodeExecutionTool`][pydantic_ai.builtin_tools.CodeExecutionTool] to be enabled.
 
-```py {title="sandbox_file_anthropic.py" test="skip"}
+```py {title="uploaded_file_container_anthropic.py" test="skip"}
 import asyncio
 
-from pydantic_ai import Agent, CodeExecutionTool, ModelSettings, SandboxFile
+from pydantic_ai import Agent, CodeExecutionTool, ModelSettings, UploadedFile
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 
@@ -400,7 +395,7 @@ async def main():
     result = await agent.run(
         [
             'Analyze this CSV data and create a summary with statistics',
-            SandboxFile(file_id=uploaded.id, provider_name=model.system),
+            UploadedFile(file_id=uploaded.id, provider_name=model.system, target='container'),
         ],
         model_settings=ModelSettings(extra_headers={'anthropic-beta': 'files-api-2025-04-14'}),
     )
@@ -411,12 +406,12 @@ async def main():
 asyncio.run(main())
 ```
 
-### Returning `SandboxFile` from Tools
+### Returning Container-Target `UploadedFile` from Tools
 
-A tool can upload a file and return a `SandboxFile` to make it available to the code execution sandbox on the next model turn.
+A tool can upload a file and return `UploadedFile(..., target='container')` to load it into the code execution sandbox on the next model turn.
 
-```py {title="sandbox_file_tool.py" test="skip"}
-from pydantic_ai import Agent, CodeExecutionTool, SandboxFile
+```py {title="uploaded_file_container_tool.py" test="skip"}
+from pydantic_ai import Agent, CodeExecutionTool, UploadedFile
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.tools import RunContext
@@ -428,11 +423,11 @@ agent = Agent(model, builtin_tools=[CodeExecutionTool()])
 
 
 @agent.tool
-async def fetch_dataset(ctx: RunContext[None], name: str) -> SandboxFile:
+async def fetch_dataset(ctx: RunContext[None], name: str) -> UploadedFile:
     """Fetch a dataset and make it available for code execution."""
     data = download_dataset(name)  # your logic here
     uploaded = await provider.client.beta.files.upload(file=data)
-    return SandboxFile(file_id=uploaded.id, provider_name=model.system)
+    return UploadedFile(file_id=uploaded.id, provider_name=model.system, target='container')
 ```
 
-When a tool returns a `SandboxFile`, the model receives a text reference to the file and a `container_upload` block is included in the next request, making the file accessible to code execution.
+When a tool returns a container-target `UploadedFile`, the model receives a text reference and Anthropic includes a `container_upload` block in the next request, making the file accessible to code execution.

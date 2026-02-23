@@ -43,7 +43,7 @@ from pydantic_ai import (
 from pydantic_ai._run_context import RunContext
 from pydantic_ai.builtin_tools import AbstractBuiltinTool, CodeExecutionTool
 from pydantic_ai.exceptions import ModelAPIError, ModelHTTPError, UserError
-from pydantic_ai.messages import SandboxFile, UploadedFile
+from pydantic_ai.messages import UploadedFile
 from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse, download_item
 from pydantic_ai.providers import Provider, infer_provider
 from pydantic_ai.providers.bedrock import BedrockModelProfile, remove_bedrock_geo_prefix
@@ -917,6 +917,10 @@ class BedrockConverseModel(Model):
                             f'UploadedFile with `provider_name={item.provider_name!r}` cannot be used with BedrockConverseModel. '
                             f'Expected `provider_name` to be `{self.system!r}`.'
                         )
+                    if item.target != 'message':
+                        raise UserError(
+                            'UploadedFile `target` values including `container` are not yet supported by BedrockConverseModel.'
+                        )
                     # UploadedFile.file_id should be an S3 URL for Bedrock
                     if not item.file_id.startswith('s3://'):
                         raise UserError(
@@ -937,8 +941,6 @@ class BedrockConverseModel(Model):
                         raise UserError('Audio files are not supported for Bedrock UploadedFile')
                     else:
                         content.append(_make_document_block(f'Document {next(document_count)}', format, source))
-                elif isinstance(item, SandboxFile):
-                    raise UserError('SandboxFile is not yet supported by BedrockConverseModel.')
                 elif isinstance(item, CachePoint):
                     if not supports_prompt_caching:
                         # Silently skip CachePoint for models that don't support prompt caching

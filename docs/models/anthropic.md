@@ -177,7 +177,7 @@ You can include up to 8 skills per request. Managed skill IDs include `pptx`, `x
 For custom skills, use `type='custom'` with your uploaded skill ID.
 See [Anthropic's skills documentation](https://docs.anthropic.com/en/docs/agents-and-tools/agent-skills/overview) for details.
 
-To load files into the code execution sandbox (e.g., for data analysis), use [`SandboxFile`](../input.md#sandbox-files) instead of [`UploadedFile`](../input.md#uploaded-files). `SandboxFile` maps to Anthropic's `container_upload` content block, making files accessible on the sandbox filesystem.
+To load files into the code execution sandbox (e.g., for data analysis), use [`UploadedFile`](../input.md#uploadedfile-targets) with `target='container'` (or `target='both'`). This maps to Anthropic's `container_upload` content block, making files accessible on the sandbox filesystem.
 
 ## Prompt Caching
 
