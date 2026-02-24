@@ -19,6 +19,7 @@ from pydantic_ai import (
     AgentRunResult,
     AgentRunResultEvent,
     AgentStreamEvent,
+    BuiltinToolCallPart,
     ExternalToolset,
     FinalResultEvent,
     FunctionToolCallEvent,
@@ -51,7 +52,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls
 from pydantic_ai.models.test import TestModel, TestStreamedResponse as ModelTestStreamedResponse
 from pydantic_ai.output import PromptedOutput, TextOutput, ToolOutput
 from pydantic_ai.result import AgentStream, FinalResult, RunUsage, StreamedRunResult, StreamedRunResultSync
-from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved, ToolDefinition
+from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved, ToolDefinition, ToolDenied
 from pydantic_ai.usage import RequestUsage
 from pydantic_graph import End
 
@@ -2098,7 +2099,7 @@ class TestMultipleToolCalls:
                         ),
                         ToolReturnPart(
                             tool_name='second_output',
-                            content='Output tool not used - output failed validation.',
+                            content='Output tool not used - output function execution failed.',
                             tool_call_id=IsStr(),
                             timestamp=IsNow(tz=timezone.utc),
                         ),
@@ -2365,6 +2366,172 @@ async def test_iter_stream_output():
     )
 
 
+@pytest.mark.filterwarnings(
+    'ignore:`BuiltinToolCallEvent` is deprecated, look for `PartStartEvent` and `PartDeltaEvent` with `BuiltinToolCallPart` instead.:DeprecationWarning'
+)
+async def test_continue_request_node_cached_run_reused() -> None:
+    request_calls = 0
+
+    def continuation_with_builtin_events(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        nonlocal request_calls
+        request_calls += 1
+        if request_calls == 1:
+            return ModelResponse(parts=[TextPart('paused')], state='suspended', finish_reason='incomplete')
+        if request_calls == 2:
+            return ModelResponse(
+                parts=[
+                    BuiltinToolCallPart(tool_name='web_search', args={'query': 'latest weather'}, tool_call_id='w_1')
+                ],
+                state='suspended',
+                finish_reason='incomplete',
+            )
+        return ModelResponse(parts=[TextPart('done')])
+
+    agent = Agent(FunctionModel(continuation_with_builtin_events))
+
+    async with agent.iter('test continuation cache') as run:
+        node = run.next_node
+        while not Agent.is_continue_request_node(node):
+            assert not Agent.is_end_node(node)
+            node = await run.next(node)
+
+        primed_next_node = await node.run(run.ctx)
+        next_node = await run.next(node)
+        assert next_node is primed_next_node
+
+        while not Agent.is_end_node(next_node):
+            next_node = await run.next(next_node)
+
+    assert request_calls == 3
+    assert run.result is not None
+    assert run.result.output == 'done'
+
+
+async def test_continue_request_node_streams_events() -> None:
+    """ContinueRequestNode.stream() uses request_stream() and yields ModelResponseStreamEvents."""
+    request_calls = 0
+    stream_calls = 0
+
+    def result_func(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        nonlocal request_calls
+        request_calls += 1
+        # First call returns suspended; continuation is handled by stream
+        return ModelResponse(parts=[TextPart('paused')], state='suspended')
+
+    async def stream_func(_messages: list[ModelMessage], _info: AgentInfo) -> AsyncIterator[str]:
+        nonlocal stream_calls
+        stream_calls += 1
+        yield 'continuation '
+        yield 'content'
+
+    agent = Agent(FunctionModel(result_func, stream_function=stream_func))
+
+    streamed_events: list[AgentStreamEvent] = []
+
+    async with agent.iter('test streaming continuation') as run:
+        node = run.next_node
+        while not Agent.is_continue_request_node(node):
+            assert not Agent.is_end_node(node)
+            node = await run.next(node)
+
+        # Use stream() to get streaming events from continuation
+        async with node.stream(run.ctx) as stream:
+            async for event in stream:
+                streamed_events.append(event)
+
+        next_node = await run.next(node)
+        while not Agent.is_end_node(next_node):
+            next_node = await run.next(next_node)
+
+    # Verify we got model response stream events (PartStartEvent, PartDeltaEvent, etc.)
+    assert any(isinstance(e, PartStartEvent) for e in streamed_events)
+    assert any(isinstance(e, PartDeltaEvent) for e in streamed_events)
+    # Non-streaming request() was called once (initial), then request_stream() for continuation
+    assert request_calls == 1
+    assert stream_calls == 1
+    assert run.result is not None
+
+
+async def test_continue_request_node_streams_multiple_continuations() -> None:
+    """ContinueRequestNode._run_stream loops when streaming continuation returns state='suspended'."""
+    from contextlib import asynccontextmanager
+
+    request_calls = 0
+    stream_calls = 0
+
+    def result_func(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        nonlocal request_calls
+        request_calls += 1
+        return ModelResponse(parts=[TextPart('paused')], state='suspended')
+
+    async def stream_func(_messages: list[ModelMessage], _info: AgentInfo) -> AsyncIterator[str]:
+        nonlocal stream_calls
+        stream_calls += 1
+        yield f'chunk {stream_calls}'
+
+    inner = FunctionModel(result_func, stream_function=stream_func)
+
+    class _SuspendOnceStreamModel(models.Model):
+        """Wraps FunctionModel so the first streaming call returns state='suspended'."""
+
+        _call_index: int = 0
+
+        async def request(
+            self,
+            messages: list[ModelMessage],
+            model_settings: models.ModelSettings | None,
+            model_request_parameters: models.ModelRequestParameters,
+        ) -> ModelResponse:
+            return await inner.request(messages, model_settings, model_request_parameters)
+
+        @asynccontextmanager
+        async def request_stream(
+            self,
+            messages: list[ModelMessage],
+            model_settings: models.ModelSettings | None,
+            model_request_parameters: models.ModelRequestParameters,
+            run_context: RunContext[Any] | None = None,
+        ) -> AsyncIterator[models.StreamedResponse]:
+            async with inner.request_stream(
+                messages, model_settings, model_request_parameters, run_context
+            ) as streamed:
+                if self._call_index == 0:
+                    streamed.state = 'suspended'
+                self._call_index += 1
+                yield streamed
+
+        @property
+        def model_name(self) -> str:
+            return inner.model_name
+
+        @property
+        def system(self) -> str:
+            return inner.system  # pragma: no cover
+
+    agent = Agent(_SuspendOnceStreamModel())
+
+    streamed_events: list[AgentStreamEvent] = []
+
+    async with agent.iter('test multi-continuation streaming') as run:
+        node = run.next_node
+        while not Agent.is_continue_request_node(node):
+            assert not Agent.is_end_node(node)
+            node = await run.next(node)
+
+        async with node.stream(run.ctx) as stream:
+            async for event in stream:
+                streamed_events.append(event)
+
+        next_node = await run.next(node)
+        while not Agent.is_end_node(next_node):
+            next_node = await run.next(next_node)
+
+    assert request_calls == 1
+    # stream_func was called twice: first returned 'suspended', second returned 'complete'
+    assert stream_calls == 2
+    assert run.result is not None
+
+
 async def test_streamed_run_result_metadata_available() -> None:
     agent = Agent(TestModel(custom_output_text='stream metadata'), metadata={'env': 'stream'})
 
@@ -2571,7 +2738,8 @@ async def test_unknown_tool_call_events():
                     tool_name='known_tool',
                     args={'x': 5},
                     tool_call_id=IsStr(),
-                )
+                ),
+                args_valid=True,
             ),
             FunctionToolCallEvent(
                 part=ToolCallPart(
@@ -2579,6 +2747,7 @@ async def test_unknown_tool_call_events():
                     args={'arg': 'value'},
                     tool_call_id=IsStr(),
                 ),
+                args_valid=False,
             ),
             FunctionToolResultEvent(
                 result=RetryPromptPart(
@@ -2631,6 +2800,7 @@ async def test_output_tool_validation_failure_events():
                     args={'bad_value': 'invalid'},
                     tool_call_id=IsStr(),
                 ),
+                args_valid=False,
             ),
             FunctionToolResultEvent(
                 result=RetryPromptPart(
@@ -2647,6 +2817,8 @@ async def test_output_tool_validation_failure_events():
                     timestamp=IsNow(tz=timezone.utc),
                 )
             ),
+            # Note: No FunctionToolCallEvent for the successful output tool call
+            # Output tools only emit FunctionToolCallEvent on validation/execution failure
         ]
     )
 
@@ -2738,7 +2910,7 @@ def test_function_tool_event_tool_call_id_properties():
     """Ensure that the `tool_call_id` property on function tool events mirrors the underlying part's ID."""
     # Prepare a ToolCallPart with a fixed ID
     call_part = ToolCallPart(tool_name='sample_tool', args={'a': 1}, tool_call_id='call_id_123')
-    call_event = FunctionToolCallEvent(part=call_part)
+    call_event = FunctionToolCallEvent(part=call_part, args_valid=True)
 
     # The event should expose the same `tool_call_id` as the part
     assert call_event.tool_call_id == call_part.tool_call_id == 'call_id_123'
@@ -2925,8 +3097,12 @@ async def test_deferred_tool_iter():
                     tool_name='my_other_tool', args={'x': 0}, tool_call_id='pyd_ai_tool_call_id__my_other_tool'
                 ),
             ),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='my_tool', args={'x': 0}, tool_call_id=IsStr())),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='my_other_tool', args={'x': 0}, tool_call_id=IsStr())),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='my_tool', args={'x': 0}, tool_call_id=IsStr()), args_valid=True
+            ),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='my_other_tool', args={'x': 0}, tool_call_id=IsStr()), args_valid=True
+            ),
         ]
     )
 
@@ -2979,8 +3155,12 @@ async def test_tool_raises_call_deferred_approval_required_iter():
                     tool_name='my_other_tool', args={'x': 0}, tool_call_id='pyd_ai_tool_call_id__my_other_tool'
                 ),
             ),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='my_tool', args={'x': 0}, tool_call_id=IsStr())),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='my_other_tool', args={'x': 0}, tool_call_id=IsStr())),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='my_tool', args={'x': 0}, tool_call_id=IsStr()), args_valid=True
+            ),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='my_other_tool', args={'x': 0}, tool_call_id=IsStr()), args_valid=True
+            ),
         ]
     )
 
@@ -3021,7 +3201,9 @@ async def test_run_event_stream_handler():
                 index=0,
                 part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id='pyd_ai_tool_call_id__ret_a'),
             ),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id=IsStr())),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id=IsStr()), args_valid=True
+            ),
             FunctionToolResultEvent(
                 result=ToolReturnPart(
                     tool_name='ret_a',
@@ -3067,7 +3249,9 @@ def test_run_sync_event_stream_handler():
                 index=0,
                 part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id='pyd_ai_tool_call_id__ret_a'),
             ),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id=IsStr())),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id=IsStr()), args_valid=True
+            ),
             FunctionToolResultEvent(
                 result=ToolReturnPart(
                     tool_name='ret_a',
@@ -3116,7 +3300,9 @@ async def test_run_stream_event_stream_handler():
                 index=0,
                 part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id='pyd_ai_tool_call_id__ret_a'),
             ),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id=IsStr())),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id=IsStr()), args_valid=True
+            ),
             FunctionToolResultEvent(
                 result=ToolReturnPart(
                     tool_name='ret_a',
@@ -3159,7 +3345,9 @@ async def test_stream_tool_returning_user_content():
                 index=0,
                 part=ToolCallPart(tool_name='get_image', args={}, tool_call_id='pyd_ai_tool_call_id__get_image'),
             ),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='get_image', args={}, tool_call_id=IsStr())),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='get_image', args={}, tool_call_id=IsStr()), args_valid=True
+            ),
             FunctionToolResultEvent(
                 result=ToolReturnPart(
                     tool_name='get_image',
@@ -3208,7 +3396,9 @@ async def test_run_stream_events():
                 index=0,
                 part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id='pyd_ai_tool_call_id__ret_a'),
             ),
-            FunctionToolCallEvent(part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id=IsStr())),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='ret_a', args={'x': 'a'}, tool_call_id=IsStr()), args_valid=True
+            ),
             FunctionToolResultEvent(
                 result=ToolReturnPart(
                     tool_name='ret_a',
@@ -3336,3 +3526,371 @@ async def test_stream_text_early_break_cleanup(delta: bool, debounce_by: float |
             break
 
     assert cleanup_called, 'stream function cleanup should have been called by aclosing propagation'
+
+
+async def test_args_validator_failure_events():
+    """Test that failed validation emits args_valid=False, retries with error message, then succeeds."""
+    validator_calls = 0
+
+    def my_validator(ctx: RunContext[int], x: int, y: int) -> None:
+        nonlocal validator_calls
+        validator_calls += 1
+        if validator_calls == 1:
+            raise ModelRetry('Validation failed: x must be positive')
+
+    agent = Agent(
+        TestModel(call_tools=['add_numbers']),
+        deps_type=int,
+    )
+
+    @agent.tool(args_validator=my_validator, retries=2)
+    def add_numbers(ctx: RunContext[int], x: int, y: int) -> int:
+        """Add two numbers."""
+        return x + y
+
+    events: list[Any] = []
+    async for event in agent.run_stream_events('call add_numbers with x=1 and y=2', deps=42):
+        events.append(event)
+
+    assert events == snapshot(
+        [
+            PartStartEvent(
+                index=0,
+                part=ToolCallPart(tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id=IsStr()),
+            ),
+            PartEndEvent(
+                index=0,
+                part=ToolCallPart(tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id=IsStr()),
+            ),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id=IsStr()),
+                args_valid=False,
+            ),
+            FunctionToolResultEvent(
+                result=RetryPromptPart(
+                    content='Validation failed: x must be positive',
+                    tool_name='add_numbers',
+                    tool_call_id=IsStr(),
+                    timestamp=IsNow(tz=timezone.utc),
+                ),
+            ),
+            PartStartEvent(
+                index=0,
+                part=ToolCallPart(tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id=IsStr()),
+            ),
+            PartEndEvent(
+                index=0,
+                part=ToolCallPart(tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id=IsStr()),
+            ),
+            FunctionToolCallEvent(
+                part=ToolCallPart(tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id=IsStr()),
+                args_valid=True,
+            ),
+            FunctionToolResultEvent(
+                result=ToolReturnPart(
+                    tool_name='add_numbers',
+                    content=0,
+                    tool_call_id=IsStr(),
+                    timestamp=IsNow(tz=timezone.utc),
+                ),
+            ),
+            PartStartEvent(index=0, part=TextPart(content='')),
+            FinalResultEvent(tool_name=None, tool_call_id=None),
+            PartDeltaEvent(index=0, delta=TextPartDelta(content_delta='{"add_nu')),
+            PartDeltaEvent(index=0, delta=TextPartDelta(content_delta='mbers":0}')),
+            PartEndEvent(index=0, part=TextPart(content='{"add_numbers":0}')),
+            AgentRunResultEvent(result=AgentRunResult(output='{"add_numbers":0}')),
+        ]
+    )
+
+
+async def test_args_validator_event_args_valid_field():
+    """Test that FunctionToolCallEvent has args_valid field set correctly."""
+
+    def my_validator(ctx: RunContext[int], x: int, y: int) -> None:
+        pass  # Always succeeds
+
+    agent = Agent(
+        TestModel(call_tools=['add_numbers']),
+        deps_type=int,
+    )
+
+    @agent.tool(args_validator=my_validator)
+    def add_numbers(ctx: RunContext[int], x: int, y: int) -> int:
+        """Add two numbers."""
+        return x + y
+
+    events: list[Any] = []
+    async for event in agent.run_stream_events('call add_numbers with x=1 and y=2', deps=42):
+        events.append(event)
+
+    assert events == snapshot(
+        [
+            PartStartEvent(
+                index=0,
+                part=ToolCallPart(
+                    tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id='pyd_ai_tool_call_id__add_numbers'
+                ),
+            ),
+            PartEndEvent(
+                index=0,
+                part=ToolCallPart(
+                    tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id='pyd_ai_tool_call_id__add_numbers'
+                ),
+            ),
+            FunctionToolCallEvent(
+                part=ToolCallPart(
+                    tool_name='add_numbers', args={'x': 0, 'y': 0}, tool_call_id='pyd_ai_tool_call_id__add_numbers'
+                ),
+                args_valid=True,
+            ),
+            FunctionToolResultEvent(
+                result=ToolReturnPart(
+                    tool_name='add_numbers',
+                    content=0,
+                    tool_call_id='pyd_ai_tool_call_id__add_numbers',
+                    timestamp=IsDatetime(),
+                )
+            ),
+            PartStartEvent(index=0, part=TextPart(content='')),
+            FinalResultEvent(tool_name=None, tool_call_id=None),
+            PartDeltaEvent(index=0, delta=TextPartDelta(content_delta='{"add_nu')),
+            PartDeltaEvent(index=0, delta=TextPartDelta(content_delta='mbers":0}')),
+            PartEndEvent(index=0, part=TextPart(content='{"add_numbers":0}')),
+            AgentRunResultEvent(result=AgentRunResult(output='{"add_numbers":0}')),
+        ]
+    )
+
+
+async def test_args_validator_event_args_valid_no_custom_validator():
+    """Test that args_valid=True when no custom validator but schema validation passes."""
+    agent = Agent(
+        TestModel(call_tools=['add_numbers']),
+        deps_type=int,
+    )
+
+    @agent.tool
+    def add_numbers(ctx: RunContext[int], x: int, y: int) -> int:
+        """Add two numbers."""
+        return x + y
+
+    events: list[Any] = []
+    async for event in agent.run_stream_events('call add_numbers with x=1 and y=2', deps=42):
+        events.append(event)
+
+    tool_call_events: list[FunctionToolCallEvent] = [e for e in events if isinstance(e, FunctionToolCallEvent)]
+    assert len(tool_call_events) >= 1
+
+    add_number_events = [e for e in tool_call_events if e.part.tool_name == 'add_numbers']
+    assert add_number_events, 'Should have events for add_numbers'
+    for event in add_number_events:
+        assert event.args_valid is True
+
+
+async def test_schema_validation_failure_args_valid_false():
+    """Test that args_valid=False when Pydantic schema validation fails (no custom validator)."""
+
+    def return_invalid_args(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:  # pragma: no cover
+        """Return a tool call with invalid arguments (wrong type)."""
+        return ModelResponse(parts=[ToolCallPart(tool_name='add_numbers', args={'x': 'not_an_int', 'y': 2})])
+
+    async def stream_invalid_args(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls]:
+        """Stream a tool call with invalid arguments."""
+        yield {0: DeltaToolCall(name='add_numbers')}
+        yield {0: DeltaToolCall(json_args='{"x": "not_an_int", "y": 2}')}
+
+    agent = Agent(FunctionModel(return_invalid_args, stream_function=stream_invalid_args), deps_type=int)
+
+    @agent.tool
+    def add_numbers(ctx: RunContext[int], x: int, y: int) -> int:  # pragma: no cover
+        """Add two numbers."""
+        return x + y
+
+    events: list[Any] = []
+    try:
+        async for event in agent.run_stream_events('call add_numbers', deps=42):  # pragma: no branch
+            events.append(event)
+    except UnexpectedModelBehavior:
+        pass  # Expected when max retries exceeded
+
+    tool_call_events: list[FunctionToolCallEvent] = [e for e in events if isinstance(e, FunctionToolCallEvent)]
+    assert len(tool_call_events) >= 1
+
+    first_event = tool_call_events[0]
+    assert first_event.part.tool_name == 'add_numbers'
+    assert first_event.args_valid is False
+
+
+async def test_args_validator_run_stream_event_handler():
+    """Test that args_valid is correctly set on FunctionToolCallEvent when using run_stream()."""
+
+    def my_validator(ctx: RunContext[int], x: int, y: int) -> None:
+        pass  # Always succeeds
+
+    agent = Agent(
+        TestModel(call_tools=['add_numbers']),
+        deps_type=int,
+    )
+
+    @agent.tool(args_validator=my_validator)
+    def add_numbers(ctx: RunContext[int], x: int, y: int) -> int:
+        """Add two numbers."""
+        return x + y
+
+    events: list[AgentStreamEvent] = []
+
+    async def handler(ctx: RunContext[int], stream: AsyncIterable[AgentStreamEvent]) -> None:
+        async for event in stream:
+            events.append(event)
+
+    async with agent.run_stream('call add_numbers', deps=42, event_stream_handler=handler) as result:
+        await result.get_output()
+
+    tool_call_events = [e for e in events if isinstance(e, FunctionToolCallEvent)]
+    assert tool_call_events
+    for event in tool_call_events:
+        assert event.args_valid is True
+
+
+async def test_event_ordering_call_before_result():
+    """Test that FunctionToolCallEvent is emitted before FunctionToolResultEvent for each tool call."""
+
+    def my_validator(ctx: RunContext[None], x: int) -> None:
+        pass
+
+    agent = Agent(TestModel(call_tools=['my_tool']))
+
+    @agent.tool(args_validator=my_validator)
+    def my_tool(ctx: RunContext[None], x: int) -> int:
+        """A tool."""
+        return x * 2
+
+    events: list[Any] = []
+    async for event in agent.run_stream_events('test'):
+        events.append(event)
+
+    call_ids_seen: set[str] = set()
+    result_ids_seen: set[str] = set()
+    for event in events:
+        if isinstance(event, FunctionToolCallEvent):
+            call_ids_seen.add(event.tool_call_id)
+            assert event.tool_call_id not in result_ids_seen, (
+                f'FunctionToolResultEvent for {event.tool_call_id} appeared before FunctionToolCallEvent'
+            )
+        elif isinstance(event, FunctionToolResultEvent):
+            result_id = event.result.tool_call_id
+            result_ids_seen.add(result_id)
+            assert result_id in call_ids_seen, (
+                f'FunctionToolResultEvent for {result_id} appeared without prior FunctionToolCallEvent'
+            )
+
+    assert call_ids_seen
+    assert result_ids_seen
+
+
+async def test_args_valid_true_for_presupplied_tool_approved():
+    """Test that args_valid=True when re-running with ToolApproved (validation runs upfront with approval context)."""
+
+    def my_validator(ctx: RunContext[int], x: int) -> None:
+        pass
+
+    agent = Agent(
+        TestModel(),
+        deps_type=int,
+        output_type=[str, DeferredToolRequests],
+    )
+
+    @agent.tool(args_validator=my_validator)
+    def my_tool(ctx: RunContext[int], x: int) -> int:
+        if not ctx.tool_call_approved:
+            raise ApprovalRequired()
+        return x * 42
+
+    # First run: tool requires approval
+    result = await agent.run('Hello', deps=42)
+    assert isinstance(result.output, DeferredToolRequests)
+    tool_call_id = result.output.approvals[0].tool_call_id
+
+    # Second run with ToolApproved: collect events
+    messages = result.all_messages()
+    events: list[Any] = []
+    async for event in agent.run_stream_events(
+        message_history=messages,
+        deferred_tool_results=DeferredToolResults(approvals={tool_call_id: ToolApproved()}),
+        deps=42,
+    ):
+        events.append(event)
+
+    # The FunctionToolCallEvent for the pre-supplied result should have args_valid=True
+    tool_call_events = [e for e in events if isinstance(e, FunctionToolCallEvent) and e.part.tool_name == 'my_tool']
+    assert tool_call_events
+    assert tool_call_events[0].args_valid is True
+
+
+async def test_args_valid_none_for_tool_denied():
+    """Test that args_valid=None for ToolDenied and the denial message appears in the result event."""
+
+    def my_validator(ctx: RunContext[int], x: int) -> None:
+        pass
+
+    agent = Agent(
+        TestModel(),
+        deps_type=int,
+        output_type=[str, DeferredToolRequests],
+    )
+
+    @agent.tool(args_validator=my_validator)
+    def my_tool(ctx: RunContext[int], x: int) -> int:
+        if not ctx.tool_call_approved:
+            raise ApprovalRequired()
+        return x  # pragma: no cover
+
+    # First run: tool requires approval
+    result = await agent.run('Hello', deps=42)
+    assert isinstance(result.output, DeferredToolRequests)
+    tool_call_id = result.output.approvals[0].tool_call_id
+
+    # Second run with ToolDenied
+    messages = result.all_messages()
+    events: list[Any] = []
+    async for event in agent.run_stream_events(
+        message_history=messages,
+        deferred_tool_results=DeferredToolResults(approvals={tool_call_id: ToolDenied('User denied this tool call')}),
+        deps=42,
+    ):
+        events.append(event)
+
+    # FunctionToolCallEvent should have args_valid=None (pre-supplied result, no upfront validation)
+    tool_call_events = [e for e in events if isinstance(e, FunctionToolCallEvent) and e.part.tool_name == 'my_tool']
+    assert tool_call_events
+    assert tool_call_events[0].args_valid is None
+
+    # FunctionToolResultEvent should contain the denial message
+    result_events = [e for e in events if isinstance(e, FunctionToolResultEvent) and e.result.tool_name == 'my_tool']
+    assert result_events
+    assert result_events[0].result.content == 'User denied this tool call'
+
+
+async def test_deferred_tool_validation_event_in_stream():
+    """Test that deferred (requires_approval) tools emit FunctionToolCallEvent with correct args_valid."""
+
+    def my_validator(ctx: RunContext[None], x: int) -> None:
+        pass
+
+    agent = Agent(
+        TestModel(),
+        output_type=[str, DeferredToolRequests],
+    )
+
+    @agent.tool(args_validator=my_validator)
+    def my_tool(ctx: RunContext[None], x: int) -> int:
+        raise ApprovalRequired()
+
+    events: list[Any] = []
+    async for event in agent.run_stream_events('test'):
+        events.append(event)
+
+    tool_call_events = [e for e in events if isinstance(e, FunctionToolCallEvent) and e.part.tool_name == 'my_tool']
+    assert tool_call_events
+    # TestModel generates valid args (x=0 by default), so validation passes
+    assert tool_call_events[0].args_valid is True

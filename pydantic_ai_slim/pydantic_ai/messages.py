@@ -107,9 +107,27 @@ FinishReason: TypeAlias = Literal[
     'length',
     'content_filter',
     'tool_call',
+    'incomplete',
     'error',
 ]
-"""Reason the model finished generating the response, normalized to OpenTelemetry values."""
+"""Reason the model finished generating the response.
+
+Mostly normalized to OpenTelemetry semantic convention values. `incomplete` is a Pydantic AI-specific value
+indicating the response content is not final. Whether the agent should automatically continue
+is determined by `ModelResponse.state`, not by this field.
+"""
+
+ModelResponseState: TypeAlias = Literal['complete', 'suspended']
+"""The state of a model response, indicating whether the response is final or requires further action.
+
+- `'complete'` — The response is done. This is the default state.
+- `'suspended'` — The model paused mid-turn and expects a continuation request.
+  Used by Anthropic `pause_turn` and OpenAI background mode.
+
+Additional states may be added in the future, e.g.:
+- User-initiated cancellation (see https://github.com/pydantic/pydantic-ai/issues/3268)
+- Model-side truncation (see https://github.com/pydantic/pydantic-ai/issues/3268)
+"""
 
 ForceDownloadMode: TypeAlias = bool | Literal['allow-local']
 """Type for the force_download parameter on FileUrl subclasses.
@@ -1564,6 +1582,16 @@ class ModelResponse:
     finish_reason: FinishReason | None = None
     """Reason the model finished generating the response, normalized to OpenTelemetry values."""
 
+    state: ModelResponseState = 'complete'
+    """The state of this response, indicating whether it is final or requires further action.
+
+    - `'complete'` — The response is done. This is the default.
+    - `'suspended'` — The model paused mid-turn and expects a continuation request.
+      The agent graph will automatically send a continuation request.
+      Set by providers that pause mid-turn (e.g. Anthropic `pause_turn`)
+      or return background/async responses (e.g. OpenAI background mode).
+    """
+
     run_id: str | None = None
     """The unique identifier of the agent run in which this message originated."""
 
@@ -2204,6 +2232,15 @@ class FunctionToolCallEvent:
     """The (function) tool call to make."""
 
     _: KW_ONLY
+
+    args_valid: bool | None = None
+    """Whether the tool arguments passed validation.
+    See the [custom validation docs](https://ai.pydantic.dev/tools-advanced/#args-validator) for more info.
+
+    - `True`: Schema validation and custom validation (if configured) both passed; args are guaranteed valid.
+    - `False`: Validation was performed and failed.
+    - `None`: Validation was not performed.
+    """
 
     event_kind: Literal['function_tool_call'] = 'function_tool_call'
     """Event type identifier, used as a discriminator."""
