@@ -187,6 +187,7 @@ def openai_model_profile(model_name: str) -> ModelProfile:
         thinking_always_enabled=thinking_always_enabled,
         supports_shell_network_policy=True,
         supports_native_shell_tool=True,
+        supports_native_apply_patch_tool=True,
         openai_system_prompt_role=openai_system_prompt_role,
         openai_chat_supports_web_search=supports_web_search,
         openai_supports_encrypted_reasoning_content=supports_reasoning,

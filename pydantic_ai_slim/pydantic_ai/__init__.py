@@ -140,6 +140,7 @@ from .tools import (
 from .toolsets import (
     AbstractToolset,
     AgentToolset,
+    ApplyPatchToolset,
     ApprovalRequiredToolset,
     CombinedToolset,
     ExternalToolset,
@@ -149,6 +150,7 @@ from .toolsets import (
     PreparedToolset,
     RenamedToolset,
     ShellToolset,
+    TextEditorToolset,
     ToolsetFunc,
     ToolsetTool,
     WrapperToolset,
@@ -272,6 +274,7 @@ __all__ = (
     # toolsets
     'AbstractToolset',
     'AgentToolset',
+    'ApplyPatchToolset',
     'ApprovalRequiredToolset',
     'CombinedToolset',
     'ExternalToolset',
@@ -281,6 +284,7 @@ __all__ = (
     'PreparedToolset',
     'RenamedToolset',
     'ShellToolset',
+    'TextEditorToolset',
     'ToolsetFunc',
     'ToolsetTool',
     'WrapperToolset',
