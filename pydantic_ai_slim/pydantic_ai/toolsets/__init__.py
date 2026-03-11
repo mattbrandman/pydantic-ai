@@ -11,6 +11,7 @@ from .function import FunctionToolset
 from .prefixed import PrefixedToolset
 from .prepared import PreparedToolset
 from .renamed import RenamedToolset
+from .shell import ShellToolset
 from .wrapper import WrapperToolset
 
 AgentToolset = Union[AbstractToolset[AgentDepsT], ToolsetFunc[AgentDepsT]]  # noqa: UP007 — Union needed at runtime (no future annotations)
@@ -29,6 +30,7 @@ __all__ = (
     'PrefixedToolset',
     'RenamedToolset',
     'PreparedToolset',
+    'ShellToolset',
     'WrapperToolset',
     'ApprovalRequiredToolset',
 )

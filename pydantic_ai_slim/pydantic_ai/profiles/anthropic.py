@@ -67,4 +67,5 @@ def anthropic_model_profile(model_name: str) -> ModelProfile | None:
         supports_thinking=True,
         anthropic_supports_adaptive_thinking=supports_adaptive,
         anthropic_supports_effort=supports_effort,
+        supports_native_shell_tool=True,
     )

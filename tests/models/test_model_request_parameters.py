@@ -72,6 +72,7 @@ def test_model_request_parameters_are_serializable():
                     'metadata': None,
                     'timeout': None,
                     'prefer_builtin': None,
+                    'native_definition': None,
                 }
             ],
             'builtin_tools': [
@@ -138,6 +139,7 @@ def test_model_request_parameters_are_serializable():
                     'metadata': None,
                     'timeout': None,
                     'prefer_builtin': None,
+                    'native_definition': None,
                 }
             ],
             'prompted_output_template': None,

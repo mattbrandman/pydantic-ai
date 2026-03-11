@@ -1,6 +1,7 @@
 from __future__ import annotations as _annotations
 
 import io
+import warnings
 from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -55,7 +56,7 @@ from ..profiles.anthropic import ANTHROPIC_THINKING_BUDGET_MAP, AnthropicModelPr
 from ..providers import Provider, infer_provider
 from ..providers.anthropic import AsyncAnthropicClient
 from ..settings import ModelSettings, ThinkingEffort, merge_model_settings
-from ..tools import ToolDefinition
+from ..tools import ShellNativeDefinition, ToolDefinition
 from . import Model, ModelRequestParameters, StreamedResponse, check_allow_model_requests, download_item, get_user_agent
 
 _FINISH_REASON_MAP: dict[BetaStopReason, FinishReason | None] = {
@@ -68,6 +69,20 @@ _FINISH_REASON_MAP: dict[BetaStopReason, FinishReason | None] = {
     'pause_turn': None,
     'refusal': 'content_filter',
 }
+
+_NATIVE_TOOL_FALLBACK_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_native_tool_fallback(kind: str, provider: str) -> None:
+    """Emit a one-time warning when a native tool falls back to function tool format."""
+    key = (kind, provider)
+    if key not in _NATIVE_TOOL_FALLBACK_WARNED:
+        _NATIVE_TOOL_FALLBACK_WARNED.add(key)
+        warnings.warn(
+            f'Native `{kind}` tool: falling back to function tool format on {provider} — model performance may be degraded.',
+            UserWarning,
+            stacklevel=4,
+        )
 
 
 try:
@@ -138,6 +153,7 @@ try:
         BetaThinkingBlockParam,
         BetaThinkingConfigParam,
         BetaThinkingDelta,
+        BetaToolBash20250124Param,
         BetaToolChoiceParam,
         BetaToolParam,
         BetaToolUnionParam,
@@ -272,6 +288,7 @@ class AnthropicModel(Model):
 
     _model_name: AnthropicModelName = field(repr=False)
     _provider: Provider[AsyncAnthropicClient] = field(repr=False)
+    _native_tool_names: dict[str, str] = field(default_factory=lambda: dict[str, str](), repr=False)
 
     def __init__(
         self,
@@ -293,6 +310,7 @@ class AnthropicModel(Model):
             settings: Default model settings for this model instance.
         """
         self._model_name = model_name
+        self._native_tool_names: dict[str, str] = {}
 
         if isinstance(provider, str):
             provider = infer_provider('gateway/anthropic' if provider == 'gateway' else provider)
@@ -468,7 +486,7 @@ class AnthropicModel(Model):
         This is the last step before sending the request to the API.
         Most preprocessing has happened in `prepare_request()`.
         """
-        tools = self._get_tools(model_request_parameters, model_settings)
+        tools, self._native_tool_names = self._get_tools(model_request_parameters, model_settings)
         tools, mcp_servers, builtin_tool_betas = self._add_builtin_tools(tools, model_request_parameters)
 
         tool_choice = self._infer_tool_choice(tools, model_settings, model_request_parameters)
@@ -582,7 +600,7 @@ class AnthropicModel(Model):
             raise UserError('AsyncAnthropicBedrock client does not support `count_tokens` api.')
 
         # standalone function to make it easier to override
-        tools = self._get_tools(model_request_parameters, model_settings)
+        tools, _ = self._get_tools(model_request_parameters, model_settings)
         tools, mcp_servers, builtin_tool_betas = self._add_builtin_tools(tools, model_request_parameters)
 
         tool_choice = self._infer_tool_choice(tools, model_settings, model_request_parameters)
@@ -650,9 +668,11 @@ class AnthropicModel(Model):
                 items.append(_map_mcp_server_result_block(item, call_part, self.system))
             else:
                 assert isinstance(item, BetaToolUseBlock), f'unexpected item type {type(item)}'
+                # Map provider-native tool names back to toolset names
+                tool_name = self._native_tool_names.get(item.name, item.name)
                 items.append(
                     ToolCallPart(
-                        tool_name=item.name,
+                        tool_name=tool_name,
                         args=cast(dict[str, Any], item.input),
                         tool_call_id=item.id,
                     )
@@ -695,14 +715,28 @@ class AnthropicModel(Model):
             _response=peekable_response,
             _provider_name=self._provider.name,
             _provider_url=self._provider.base_url,
+            _native_tool_names=self._native_tool_names,
         )
 
     def _get_tools(
         self, model_request_parameters: ModelRequestParameters, model_settings: AnthropicModelSettings
-    ) -> list[BetaToolUnionParam]:
-        tools: list[BetaToolUnionParam] = [
-            self._map_tool_definition(r) for r in model_request_parameters.tool_defs.values()
-        ]
+    ) -> tuple[list[BetaToolUnionParam], dict[str, str]]:
+        tools: list[BetaToolUnionParam] = []
+        native_tool_names: dict[str, str] = {}
+
+        for tool_def in model_request_parameters.tool_defs.values():
+            native_def = tool_def.native_definition
+            if (
+                native_def is not None
+                and isinstance(native_def, ShellNativeDefinition)
+                and self.profile.supports_native_shell_tool
+            ):
+                tools.append(BetaToolBash20250124Param(type='bash_20250124', name='bash'))
+                native_tool_names['bash'] = tool_def.name
+            else:
+                if native_def is not None and not self.profile.supports_native_shell_tool:
+                    _warn_native_tool_fallback(native_def.kind, 'anthropic')
+                tools.append(self._map_tool_definition(tool_def))
 
         # Add cache_control to the last tool if enabled
         if tools and (cache_tool_defs := model_settings.get('anthropic_cache_tool_definitions')):
@@ -711,7 +745,7 @@ class AnthropicModel(Model):
             last_tool = tools[-1]
             last_tool['cache_control'] = self._build_cache_control(ttl)
 
-        return tools
+        return tools, native_tool_names
 
     def _add_builtin_tools(
         self, tools: list[BetaToolUnionParam], model_request_parameters: ModelRequestParameters
@@ -1434,6 +1468,7 @@ class AnthropicStreamedResponse(StreamedResponse):
     _response: AsyncIterable[BetaRawMessageStreamEvent]
     _provider_name: str
     _provider_url: str
+    _native_tool_names: dict[str, str] = field(default_factory=lambda: dict[str, str]())
     _timestamp: datetime = field(default_factory=_utils.now_utc)
 
     async def _get_event_iterator(self) -> AsyncIterator[ModelResponseStreamEvent]:  # noqa: C901
@@ -1472,9 +1507,11 @@ class AnthropicStreamedResponse(StreamedResponse):
                     ):
                         yield event_
                 elif isinstance(current_block, BetaToolUseBlock):
+                    # Map provider-native tool names back to toolset names
+                    tool_name = self._native_tool_names.get(current_block.name, current_block.name)
                     maybe_event = self._parts_manager.handle_tool_call_delta(
                         vendor_part_id=event.index,
-                        tool_name=current_block.name,
+                        tool_name=tool_name,
                         args=cast(dict[str, Any], current_block.input) or None,
                         tool_call_id=current_block.id,
                     )
