@@ -8626,7 +8626,7 @@ async def test_anthropic_container_from_message_history(allow_model_requests: No
     await agent.run('follow up', message_history=history)
 
     completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
-    assert completion_kwargs['container'] == BetaContainerParams(id='container_from_history')
+    assert completion_kwargs['container'] == 'container_from_history'
 
 
 async def test_anthropic_container_setting_false_ignores_history(allow_model_requests: None):
