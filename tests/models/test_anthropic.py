@@ -9623,3 +9623,279 @@ async def test_anthropic_shell_tool_skills_added_to_explicit_container(allow_mod
     assert container == snapshot(
         {'id': 'container_existing', 'skills': [{'skill_id': 'computer-use', 'type': 'anthropic', 'version': '2'}]}
     )
+
+
+async def test_anthropic_container_setting_string(allow_model_requests: None):
+    """Test that anthropic_container as a plain string passes the string directly to API."""
+    c = completion_message([BetaTextBlock(text='ok', type='text')], BetaUsage(input_tokens=5, output_tokens=5))
+    mock_client = MockAnthropic.create_mock(c)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    await agent.run('hello', model_settings=cast(AnthropicModelSettings, {'anthropic_container': 'cntr_string_123'}))
+
+    completion_kwargs = get_mock_chat_completion_kwargs(mock_client)[0]
+    assert completion_kwargs['container'] == 'cntr_string_123'
+
+
+async def test_anthropic_container_error_retry_bash(allow_model_requests: None):
+    """Auto-retry with a fresh container when all bash exec results are errors (non-streaming)."""
+    from anthropic.types.beta import BetaBashCodeExecutionToolResultBlock, BetaBashCodeExecutionToolResultError
+
+    usage = BetaUsage(input_tokens=5, output_tokens=5)
+    error_block = BetaBashCodeExecutionToolResultBlock(
+        type='bash_code_execution_tool_result',
+        content=BetaBashCodeExecutionToolResultError(
+            type='bash_code_execution_tool_result_error',
+            error_code='invalid_tool_input',
+        ),
+        tool_use_id='tu_001',
+    )
+    error_response = completion_message([error_block], usage)
+    ok_response = completion_message([BetaTextBlock(text='retried ok', type='text')], usage)
+    mock_client = MockAnthropic.create_mock([error_response, ok_response])
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    result = await agent.run('hello')
+    assert result.output == 'retried ok'
+
+    # Two requests made: original + retry
+    kwargs = get_mock_chat_completion_kwargs(mock_client)
+    assert len(kwargs) == 2
+
+
+async def test_anthropic_container_error_retry_text_editor(allow_model_requests: None):
+    """Auto-retry when all text editor exec results are errors (covers _is_exec_result_error for text editor)."""
+    from anthropic.types.beta import BetaTextEditorCodeExecutionToolResultError
+
+    usage = BetaUsage(input_tokens=5, output_tokens=5)
+    error_block = BetaTextEditorCodeExecutionToolResultBlock(
+        type='text_editor_code_execution_tool_result',
+        content=BetaTextEditorCodeExecutionToolResultError(
+            type='text_editor_code_execution_tool_result_error',
+            error_code='invalid_tool_input',
+        ),
+        tool_use_id='tu_002',
+    )
+    error_response = completion_message([error_block], usage)
+    ok_response = completion_message([BetaTextBlock(text='retried ok', type='text')], usage)
+    mock_client = MockAnthropic.create_mock([error_response, ok_response])
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    result = await agent.run('hello')
+    assert result.output == 'retried ok'
+
+    kwargs = get_mock_chat_completion_kwargs(mock_client)
+    assert len(kwargs) == 2
+
+
+async def test_anthropic_stream_container_error_retry(allow_model_requests: None):
+    """Streaming auto-retry when history container produces all error exec results."""
+    from anthropic.types.beta import BetaBashCodeExecutionToolResultBlock, BetaBashCodeExecutionToolResultError
+
+    usage = BetaUsage(input_tokens=5, output_tokens=5)
+
+    # Stream events with a bash execution error block
+    error_block = BetaBashCodeExecutionToolResultBlock(
+        type='bash_code_execution_tool_result',
+        content=BetaBashCodeExecutionToolResultError(
+            type='bash_code_execution_tool_result_error',
+            error_code='invalid_tool_input',
+        ),
+        tool_use_id='tu_err',
+    )
+    stream_events: list[BetaRawMessageStreamEvent] = [
+        BetaRawMessageStartEvent(
+            type='message_start',
+            message=BetaMessage(
+                id='msg_err',
+                content=[],
+                model='claude-3-5-haiku-123',
+                role='assistant',
+                stop_reason=None,
+                type='message',
+                usage=usage,
+            ),
+        ),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=0,
+            content_block=error_block,
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=0),
+        BetaRawMessageDeltaEvent(
+            type='message_delta',
+            delta=Delta(stop_reason='end_turn', stop_sequence=None),
+            usage=BetaMessageDeltaUsage(output_tokens=5),
+        ),
+        BetaRawMessageStopEvent(type='message_stop'),
+    ]
+
+    # Non-streaming retry response
+    ok_response = completion_message([BetaTextBlock(text='retried ok', type='text')], usage)
+
+    # Construct mock with both stream (for first call) and messages (for retry)
+    # Index 0: stream call reads stream[0], index becomes 1
+    # Index 1: non-stream retry reads messages_[1], index becomes 2
+    dummy_response = completion_message([BetaTextBlock(text='dummy', type='text')], usage)
+    mock = MockAnthropic(
+        stream=[stream_events],
+        messages_=[dummy_response, ok_response],
+    )
+    mock_client = cast(AsyncAnthropic, mock)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    # Message history with a container_id so has_history_container is True
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content='hello')]),
+        ModelResponse(
+            parts=[TextPart(content='world')],
+            provider_name='anthropic',
+            provider_details={'container_id': 'cntr_from_history'},
+        ),
+    ]
+
+    async with agent.run_stream('follow up', message_history=history) as result:
+        output = await result.get_output()
+        assert output == 'retried ok'
+
+    # Two requests: stream + non-stream retry
+    kwargs = get_mock_chat_completion_kwargs(mock_client)
+    assert len(kwargs) == 2
+
+
+async def test_anthropic_stream_history_container_success(allow_model_requests: None):
+    """Streaming with history container succeeds when no container errors in response."""
+    usage = BetaUsage(input_tokens=5, output_tokens=5)
+
+    stream_events: list[BetaRawMessageStreamEvent] = [
+        BetaRawMessageStartEvent(
+            type='message_start',
+            message=BetaMessage(
+                id='msg_ok',
+                content=[],
+                model='claude-3-5-haiku-123',
+                role='assistant',
+                stop_reason=None,
+                type='message',
+                usage=usage,
+            ),
+        ),
+        BetaRawContentBlockStartEvent(
+            type='content_block_start',
+            index=0,
+            content_block=BetaTextBlock(text='', type='text'),
+        ),
+        BetaRawContentBlockDeltaEvent(
+            type='content_block_delta',
+            index=0,
+            delta=BetaTextDelta(type='text_delta', text='streamed ok'),
+        ),
+        BetaRawContentBlockStopEvent(type='content_block_stop', index=0),
+        BetaRawMessageDeltaEvent(
+            type='message_delta',
+            delta=Delta(stop_reason='end_turn', stop_sequence=None),
+            usage=BetaMessageDeltaUsage(output_tokens=5),
+        ),
+        BetaRawMessageStopEvent(type='message_stop'),
+    ]
+
+    mock_client = MockAnthropic.create_stream_mock(stream_events)
+    m = AnthropicModel('claude-haiku-4-5', provider=AnthropicProvider(anthropic_client=mock_client))
+    agent = Agent(m)
+
+    # Message history with a container_id so has_history_container is True
+    history: list[ModelMessage] = [
+        ModelRequest(parts=[UserPromptPart(content='hello')]),
+        ModelResponse(
+            parts=[TextPart(content='world')],
+            provider_name='anthropic',
+            provider_details={'container_id': 'cntr_from_history'},
+        ),
+    ]
+
+    async with agent.run_stream('follow up', message_history=history) as result:
+        output = await result.get_output()
+        assert output == 'streamed ok'
+
+    # Only one request (no retry)
+    kwargs = get_mock_chat_completion_kwargs(mock_client)
+    assert len(kwargs) == 1
+
+
+async def test_anthropic_code_execution_file_outputs(allow_model_requests: None, anthropic_api_key: str):
+    """Code execution that produces file outputs extracts UploadedFile parts."""
+    m = AnthropicModel('claude-sonnet-4-6', provider=AnthropicProvider(api_key=anthropic_api_key))
+    agent = Agent(
+        m,
+        builtin_tools=[CodeExecutionTool()],
+        instructions='Always use code execution. Create a small CSV file and save it. Keep responses brief.',
+    )
+
+    result = await agent.run('Create a CSV file with 3 rows of sample data (name, age) and save it as output.csv')
+    messages = result.all_messages()
+
+    # Check that UploadedFile parts were extracted from file outputs
+    uploaded_files = [part for msg in messages for part in msg.parts if isinstance(part, UploadedFile)]
+    # Code execution may or may not produce file outputs depending on the model's response
+    # but the BuiltinToolReturnPart should be present
+    tool_returns = [part for msg in messages for part in msg.parts if isinstance(part, BuiltinToolReturnPart)]
+    assert len(tool_returns) >= 1
+
+    # If file outputs were produced, verify they are UploadedFile with correct provider
+    for uploaded_file in uploaded_files:
+        assert uploaded_file.provider_name == 'anthropic'
+        assert uploaded_file.file_id  # non-empty
+
+
+async def test_anthropic_code_execution_file_outputs_stream(allow_model_requests: None, anthropic_api_key: str):
+    """Streaming code execution that produces file outputs extracts UploadedFile parts."""
+    m = AnthropicModel('claude-sonnet-4-6', provider=AnthropicProvider(api_key=anthropic_api_key))
+    agent = Agent(
+        m,
+        builtin_tools=[CodeExecutionTool()],
+        instructions='Always use code execution. Create a small CSV file and save it. Keep responses brief.',
+    )
+
+    async with agent.run_stream(
+        'Create a CSV file with 3 rows of sample data (name, age) and save it as output.csv'
+    ) as result:
+        await result.get_output()
+
+    messages = result.all_messages()
+
+    # Check that UploadedFile parts were extracted from file outputs
+    uploaded_files = [part for msg in messages for part in msg.parts if isinstance(part, UploadedFile)]
+    tool_returns = [part for msg in messages for part in msg.parts if isinstance(part, BuiltinToolReturnPart)]
+    assert len(tool_returns) >= 1
+
+    for uploaded_file in uploaded_files:
+        assert uploaded_file.provider_name == 'anthropic'
+        assert uploaded_file.file_id
+
+
+async def test_anthropic_shell_tool_file_outputs_stream(allow_model_requests: None, anthropic_api_key: str):
+    """Streaming shell tool (bash code execution) that produces file outputs extracts UploadedFile parts."""
+    m = AnthropicModel('claude-sonnet-4-6', provider=AnthropicProvider(api_key=anthropic_api_key))
+    agent = Agent(
+        m,
+        builtin_tools=[ShellTool()],
+        instructions='Always use the shell tool. Create a file and save it. Keep responses brief.',
+    )
+
+    async with agent.run_stream(
+        'Use python to create a CSV file with 3 rows of data (name, age) and save it as output.csv'
+    ) as result:
+        await result.get_output()
+
+    messages = result.all_messages()
+    tool_returns = [part for msg in messages for part in msg.parts if isinstance(part, BuiltinToolReturnPart)]
+    assert len(tool_returns) >= 1
+    # Shell tool file outputs may or may not be present depending on model behavior
+    uploaded_files = [part for msg in messages for part in msg.parts if isinstance(part, UploadedFile)]
+    for uploaded_file in uploaded_files:
+        assert uploaded_file.provider_name == 'anthropic'
+        assert uploaded_file.file_id

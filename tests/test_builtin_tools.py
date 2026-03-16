@@ -353,6 +353,21 @@ async def test_shell_tool_and_code_execution_tool_mutual_exclusion_stream(model:
             ...  # pragma: no cover
 
 
+def test_get_container_id_from_anthropic_provider_details():
+    """ShellTool.get_container_id extracts container_id from Anthropic provider_details."""
+    from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+
+    messages = [
+        ModelRequest(parts=[UserPromptPart(content='hello')]),
+        ModelResponse(
+            parts=[TextPart(content='world')],
+            provider_name='anthropic',
+            provider_details={'container_id': 'cntr_anthropic_abc'},
+        ),
+    ]
+    assert ShellTool.get_container_id(messages) == 'cntr_anthropic_abc'
+
+
 async def test_shell_tool_and_code_execution_tool_mutual_exclusion_openai_responses(allow_model_requests: None):
     pytest.importorskip('openai')
 

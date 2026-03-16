@@ -6228,3 +6228,242 @@ async def test_shell_output_edge_cases_in_response(allow_model_requests: None):
     # Empty output → no 'outputs' key
     content_empty = cast(dict[str, Any], returns[1].content)
     assert content_empty == snapshot({'status': 'completed'})
+
+
+async def test_openai_container_not_found_retry(allow_model_requests: None):
+    """Auto-retry with fresh container when 404 container-not-found error occurs."""
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    from pydantic_ai.models.openai import NOT_GIVEN
+
+    # Build a 404 error for container not found
+    request = httpx.Request('POST', 'https://api.openai.com/v1/responses')
+    http_response = httpx.Response(404, json={'message': 'Container cntr_old not found'}, request=request)
+    error = APIStatusError(
+        message='Container cntr_old not found',
+        response=http_response,
+        body={'message': 'Container cntr_old not found'},
+    )
+
+    text_msg = ResponseOutputMessage(
+        id='msg_retry_001',
+        type='message',
+        role='assistant',
+        status='completed',
+        content=[ResponseOutputText(text='retried ok', type='output_text', annotations=[])],
+    )
+    ok_response = response_message([text_msg])
+
+    # Custom mock that properly increments call count on exception
+    mock = MockOpenAIResponses()
+    call_count = 0
+
+    async def custom_create(*_args: Any, **kwargs: Any) -> Any:
+        nonlocal call_count
+        mock.response_kwargs.append({k: v for k, v in kwargs.items() if v is not NOT_GIVEN})
+        call_count += 1
+        if call_count == 1:
+            raise error
+        return ok_response
+
+    mock.responses_create = custom_create
+    mock_client = cast(AsyncOpenAI, mock)
+    m = OpenAIResponsesModel('gpt-5.4', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m, builtin_tools=[ShellTool()])
+
+    result = await agent.run('hello')
+    assert result.output == 'retried ok'
+
+    # Two requests made: original + retry
+    assert call_count == 2
+
+
+async def test_openai_404_non_dict_body_not_container_error(allow_model_requests: None):
+    """A 404 with non-dict body is NOT a container-not-found error and raises ModelHTTPError."""
+    from pydantic_ai.models.openai import NOT_GIVEN
+
+    request = httpx.Request('POST', 'https://api.openai.com/v1/responses')
+    http_response = httpx.Response(404, text='Not Found', request=request)
+    error = APIStatusError(message='Not Found', response=http_response, body='Not Found')
+
+    mock = MockOpenAIResponses()
+
+    async def custom_create(*_args: Any, **kwargs: Any) -> Any:
+        mock.response_kwargs.append({k: v for k, v in kwargs.items() if v is not NOT_GIVEN})
+        raise error
+
+    mock.responses_create = custom_create
+    mock_client = cast(AsyncOpenAI, mock)
+    m = OpenAIResponsesModel('gpt-5.4', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m, builtin_tools=[ShellTool()])
+
+    with pytest.raises(ModelHTTPError) as exc_info:
+        await agent.run('hello')
+    assert exc_info.value.status_code == 404
+
+
+async def test_openai_container_file_upload_subsequent_turn(allow_model_requests: None):
+    """Container-targeted files are uploaded via containers API on subsequent turns."""
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    text_msg = ResponseOutputMessage(
+        id='msg_fu_001',
+        type='message',
+        role='assistant',
+        status='completed',
+        content=[ResponseOutputText(text='ok', type='output_text', annotations=[])],
+    )
+    r = response_message([text_msg])
+    mock_client = MockOpenAIResponses.create_mock(r)
+    m = OpenAIResponsesModel('gpt-5.4', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m, builtin_tools=[ShellTool()])
+
+    # Mock the containers.files.create API
+    mock_files_create = AsyncMock()
+    mock_files = type('Files', (), {'create': mock_files_create})
+    mock_containers = type('Containers', (), {'files': mock_files})
+    m.client.containers = mock_containers  # type: ignore
+
+    # Message history with an existing container_id (from a previous shell call)
+    history = [
+        ModelRequest(parts=[UserPromptPart(content='run echo hello')]),
+        ModelResponse(
+            parts=[
+                BuiltinToolCallPart(
+                    tool_name='shell',
+                    args={'commands': ['echo hello'], 'container_id': 'cntr_existing'},
+                    tool_call_id='call_001',
+                    provider_name='openai',
+                ),
+            ],
+            provider_name='openai',
+        ),
+    ]
+
+    # New message with a container-targeted uploaded file
+    await agent.run(
+        ['Process this', UploadedFile(file_id='file-new-001', provider_name='openai', target='container')],
+        message_history=history,
+    )
+
+    # Verify the file was uploaded to the existing container
+    mock_files_create.assert_called_once_with(container_id='cntr_existing', file_id='file-new-001')
+
+
+async def test_code_interpreter_with_network_policy(allow_model_requests: None):
+    """CodeExecutionTool with network_policy sets the policy on the code_interpreter tool param."""
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    from pydantic_ai.builtin_tools import CodeExecutionNetworkPolicy, CodeExecutionTool
+
+    text_msg = ResponseOutputMessage(
+        id='msg_ci_np_001',
+        type='message',
+        role='assistant',
+        status='completed',
+        content=[ResponseOutputText(text='ok', type='output_text', annotations=[])],
+    )
+    r = response_message([text_msg])
+
+    # Test disabled network policy
+    mock_client = MockOpenAIResponses.create_mock(r)
+    m = OpenAIResponsesModel('gpt-5.4', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool(network_policy=CodeExecutionNetworkPolicy(mode='disabled'))])
+    await agent.run('hello')
+
+    kwargs = get_mock_responses_kwargs(mock_client)[0]
+    ci_tools = [t for t in kwargs['tools'] if t.get('type') == 'code_interpreter']
+    assert len(ci_tools) == 1
+    assert ci_tools[0]['container']['network_policy'] == snapshot({'type': 'disabled'})
+
+    # Test allowlist network policy
+    mock_client2 = MockOpenAIResponses.create_mock(r)
+    m2 = OpenAIResponsesModel('gpt-5.4', provider=OpenAIProvider(openai_client=mock_client2))
+    agent2 = Agent(
+        m2,
+        builtin_tools=[
+            CodeExecutionTool(
+                network_policy=CodeExecutionNetworkPolicy(mode='allowlist', allowed_domains=['example.com'])
+            )
+        ],
+    )
+    await agent2.run('hello')
+
+    kwargs2 = get_mock_responses_kwargs(mock_client2)[0]
+    ci_tools2 = [t for t in kwargs2['tools'] if t.get('type') == 'code_interpreter']
+    assert ci_tools2[0]['container']['network_policy'] == snapshot(
+        {'type': 'allowlist', 'allowed_domains': ['example.com']}
+    )
+
+
+async def test_code_interpreter_with_uploaded_files(allow_model_requests: None):
+    """CodeExecutionTool with openai_shell_uploaded_files includes file_ids in tool param."""
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    from pydantic_ai.builtin_tools import CodeExecutionTool
+
+    text_msg = ResponseOutputMessage(
+        id='msg_ci_uf_001',
+        type='message',
+        role='assistant',
+        status='completed',
+        content=[ResponseOutputText(text='ok', type='output_text', annotations=[])],
+    )
+    r = response_message([text_msg])
+    mock_client = MockOpenAIResponses.create_mock(r)
+    m = OpenAIResponsesModel('gpt-5.4', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m, builtin_tools=[CodeExecutionTool()])
+
+    settings = cast(
+        OpenAIResponsesModelSettings,
+        {'openai_shell_uploaded_files': [UploadedFile(file_id='file-ci-001', provider_name='openai')]},
+    )
+    await agent.run('hello', model_settings=settings)
+
+    kwargs = get_mock_responses_kwargs(mock_client)[0]
+    ci_tools = [t for t in kwargs['tools'] if t.get('type') == 'code_interpreter']
+    assert len(ci_tools) == 1
+    assert ci_tools[0]['container']['file_ids'] == snapshot(['file-ci-001'])
+
+
+async def test_shell_tool_param_force_fresh_ignores_history(allow_model_requests: None):
+    """ShellTool with openai_shell_container=False ignores container from history."""
+    from openai.types.responses import ResponseOutputMessage, ResponseOutputText
+
+    text_msg = ResponseOutputMessage(
+        id='msg_ff_001',
+        type='message',
+        role='assistant',
+        status='completed',
+        content=[ResponseOutputText(text='ok', type='output_text', annotations=[])],
+    )
+    r = response_message([text_msg])
+    mock_client = MockOpenAIResponses.create_mock(r)
+    m = OpenAIResponsesModel('gpt-5.4', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(m, builtin_tools=[ShellTool()])
+
+    # Message history with an existing container
+    history = [
+        ModelRequest(parts=[UserPromptPart(content='hello')]),
+        ModelResponse(
+            parts=[
+                BuiltinToolCallPart(
+                    tool_name='shell',
+                    args={'commands': ['echo hi'], 'container_id': 'cntr_should_ignore'},
+                    tool_call_id='call_001',
+                    provider_name='openai',
+                ),
+            ],
+            provider_name='openai',
+        ),
+    ]
+
+    # Force fresh container
+    settings = cast(OpenAIResponsesModelSettings, {'openai_shell_container': False})
+    await agent.run('follow up', message_history=history, model_settings=settings)
+
+    kwargs = get_mock_responses_kwargs(mock_client)[0]
+    shell_tools = [t for t in kwargs['tools'] if t.get('type') == 'shell']
+    assert len(shell_tools) == 1
+    # Should use container_auto, NOT container_reference with the history container
+    assert shell_tools[0]['environment']['type'] == 'container_auto'
