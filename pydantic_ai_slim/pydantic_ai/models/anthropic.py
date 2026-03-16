@@ -61,6 +61,7 @@ from . import (
     get_user_agent,
     warn_native_tool_fallback,
 )
+from .wrapper import CompletedStreamedResponse
 
 _FINISH_REASON_MAP: dict[BetaStopReason, FinishReason] = {
     'compaction': 'stop',
@@ -87,6 +88,7 @@ try:
         BetaBase64PDFSourceParam,
         BetaBashCodeExecutionToolResultBlock,
         BetaBashCodeExecutionToolResultBlockParam,
+        BetaBashCodeExecutionToolResultError,
         BetaCacheControlEphemeralParam,
         BetaCitationsConfigParam,
         BetaCitationsDelta,
@@ -137,6 +139,7 @@ try:
         BetaTextDelta,
         BetaTextEditorCodeExecutionToolResultBlock,
         BetaTextEditorCodeExecutionToolResultBlockParam,
+        BetaTextEditorCodeExecutionToolResultError,
         BetaThinkingBlock,
         BetaThinkingBlockParam,
         BetaThinkingConfigParam,
@@ -341,6 +344,13 @@ class AnthropicModel(Model):
         model_settings = cast(AnthropicModelSettings, model_settings or {})
         try:
             response = await self._messages_create(messages, False, model_settings, model_request_parameters)
+            # Auto-retry with a fresh container when an auto-inferred container has expired.
+            if (
+                not model_settings.get('anthropic_container')
+                and _has_container_error(response)
+            ):
+                fresh_settings = cast(AnthropicModelSettings, {**model_settings, 'anthropic_container': False})
+                response = await self._messages_create(messages, False, fresh_settings, model_request_parameters)
             return self._process_response(response)
         except ValueError as e:
             if 'Streaming is required' in str(e):
@@ -384,11 +394,28 @@ class AnthropicModel(Model):
             model_settings,
             model_request_parameters,
         )
-        response = await self._messages_create(
-            messages, True, cast(AnthropicModelSettings, model_settings or {}), model_request_parameters
-        )
+        settings = cast(AnthropicModelSettings, model_settings or {})
+        response = await self._messages_create(messages, True, settings, model_request_parameters)
         async with response:
-            yield await self._process_streamed_response(response, model_request_parameters)
+            streamed_response = await self._process_streamed_response(response, model_request_parameters)
+            # When reusing a container from history, consume the stream first to check for
+            # container errors. If all code execution results failed, retry with a fresh container.
+            has_history_container = (
+                not settings.get('anthropic_container')
+                and self._get_container(messages, settings, model_request_parameters) is not None
+            )
+            if has_history_container:
+                async for _ in streamed_response:
+                    pass
+                model_response = streamed_response.get()
+                if _has_container_error_in_response(model_response):
+                    fresh_settings = cast(AnthropicModelSettings, {**settings, 'anthropic_container': False})
+                    retry = await self._messages_create(messages, False, fresh_settings, model_request_parameters)
+                    yield CompletedStreamedResponse(model_request_parameters, self._process_response(retry))
+                    return
+                yield CompletedStreamedResponse(model_request_parameters, model_response)
+            else:
+                yield streamed_response
 
     def prepare_request(
         self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters
@@ -1578,6 +1605,48 @@ class AnthropicStreamedResponse(StreamedResponse):
     def timestamp(self) -> datetime:
         """Get the timestamp of the response."""
         return self._timestamp
+
+
+_CONTAINER_ERROR_CODES = frozenset({'container_expired', 'invalid_tool_input'})
+
+
+def _is_exec_result_error(item: BetaBashCodeExecutionToolResultBlock | BetaTextEditorCodeExecutionToolResultBlock) -> bool:
+    """Check if a code execution result block is a container-related error."""
+    content = item.content
+    if isinstance(content, BetaBashCodeExecutionToolResultError):
+        return content.error_code in _CONTAINER_ERROR_CODES
+    if isinstance(content, BetaTextEditorCodeExecutionToolResultError):
+        return content.error_code in _CONTAINER_ERROR_CODES
+    return False
+
+
+def _has_container_error(response: BetaMessage) -> bool:
+    """Check if ALL code execution tool results in the raw response are container errors."""
+    exec_results = [
+        item
+        for item in response.content
+        if isinstance(item, (BetaBashCodeExecutionToolResultBlock, BetaTextEditorCodeExecutionToolResultBlock))
+    ]
+    if not exec_results:
+        return False
+    return all(_is_exec_result_error(item) for item in exec_results)
+
+
+def _has_container_error_in_response(response: ModelResponse) -> bool:
+    """Check if ALL code execution tool results in a processed ModelResponse are container errors."""
+    exec_results = [
+        part
+        for part in response.parts
+        if isinstance(part, BuiltinToolReturnPart)
+        and part.tool_name == ShellTool.kind
+        and isinstance(part.content, dict)
+    ]
+    if not exec_results:
+        return False
+    return all(
+        part.content.get('error_code') in _CONTAINER_ERROR_CODES  # type: ignore[union-attr]
+        for part in exec_results
+    )
 
 
 def _map_server_tool_use_block(item: BetaServerToolUseBlock, provider_name: str) -> BuiltinToolCallPart:
