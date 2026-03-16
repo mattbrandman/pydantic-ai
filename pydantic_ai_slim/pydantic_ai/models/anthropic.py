@@ -1637,6 +1637,9 @@ class AnthropicStreamedResponse(StreamedResponse):
                     self.provider_details['finish_reason'] = raw_finish_reason
                     self.finish_reason = _FINISH_REASON_MAP.get(raw_finish_reason)
                     self.state = 'suspended' if raw_finish_reason == 'pause_turn' else 'complete'
+                if event.delta.container:
+                    self.provider_details = self.provider_details or {}
+                    self.provider_details['container_id'] = event.delta.container.id
 
             elif isinstance(event, BetaRawContentBlockStopEvent):  # pragma: no branch
                 if isinstance(current_block, BetaMCPToolUseBlock):
