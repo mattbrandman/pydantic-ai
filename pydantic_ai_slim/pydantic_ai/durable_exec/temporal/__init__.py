@@ -14,8 +14,8 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from ...exceptions import UserError
 from ._agent import TemporalAgent
-from ._logfire import LogfirePlugin
 from ._builtin_tools import ShellToolTemporalRunContext
+from ._logfire import LogfirePlugin
 from ._run_context import TemporalRunContext
 from ._toolset import TemporalWrapperToolset
 from ._workflow import PydanticAIWorkflow

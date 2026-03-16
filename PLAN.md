@@ -1856,3 +1856,33 @@ Phase 1 (remote) and Phase 2 (local) both produce OpenAI `shell_call` / `shell_c
 - `tests/test_capabilities.py` — routing logic, decomposition, data privacy defaults
 - `tests/test_capabilities_integration.py` — VCR cassettes through capability API
 
+### Phase 1.5 (UploadedFile in ModelResponsePart — Backfill from PR #12)
+
+PR #12 (`skill-support-v1`) included `UploadedFile` in `ModelResponsePart` so that file outputs from
+code execution (e.g. Anthropic `code_execution_output` blocks with `file_id`) could be extracted and
+serialized in message history. This was lost when PR #14 (`skill-support-v2`) superseded it. Without
+this, `UploadedFile` objects in `ModelResponse.parts` fail Pydantic discriminated-union validation on
+deserialization (causing Sentry errors WEB-BACKEND-BXC / WEB-BACKEND-C6Q in downstream apps).
+
+**Changes:**
+
+1. `messages.py`: Added `part_kind: Literal['uploaded-file']` to `UploadedFile`, added `UploadedFile`
+   to the `ModelResponsePart` union, added `'uploaded-file'` to `PartStartEvent.previous_part_kind`
+   and `PartEndEvent.next_part_kind`.
+
+2. `models/anthropic.py`: Added `_extract_uploaded_files_from_result_outputs()` that extracts
+   `UploadedFile` instances from `BetaCodeExecutionResultBlock` and `BetaBashCodeExecutionResultBlock`
+   content (which contain `BetaCodeExecutionOutputBlock` entries with `file_id`). Updated
+   `_map_code_execution_tool_result_block()` and `_map_bash_code_execution_tool_result_block()` to
+   return `tuple[BuiltinToolReturnPart, list[UploadedFile]]`. Updated both non-streaming
+   (`_process_response`) and streaming (`AnthropicStreamedResponse`) callers to extend parts with
+   extracted files.
+
+3. All model adapters: Added `UploadedFile` handling in `assert_never` chains for `ModelResponsePart`
+   iteration (13 model files + vercel_ai adapter).
+
+4. `_agent_graph.py`: Added `UploadedFile` branch in streaming part iteration (pass-through).
+
+5. `result.py`: Added `UploadedFile` check in `stream_responses` initial-yield logic.
+
+**VCR cassette:** `test_anthropic_code_execution_file_outputs` demonstrates end-to-end extraction.
