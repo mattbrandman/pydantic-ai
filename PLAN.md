@@ -385,6 +385,22 @@ class ShellTool(AbstractBuiltinTool):
     kind: str = 'shell'
 ```
 
+### 4.1.1 `CodeExecutionTool` Updates
+
+`CodeExecutionTool` now supports `network_policy` and `file_ids` on OpenAI Responses. The OpenAI `code_interpreter` tool's `auto` container supports the same `network_policy` (allowlist/disabled) and `file_ids` fields as the `shell` tool's `container_auto` — the only difference is `skills`, which is `shell`-only.
+
+```python
+@dataclass(kw_only=True)
+class CodeExecutionTool(AbstractBuiltinTool):
+    network_policy: CodeExecutionNetworkPolicy | None = None
+    kind: str = 'code_execution'
+```
+
+The OpenAI adapter builds the `code_interpreter` param via `_build_code_interpreter_param()`, which:
+- Wires `network_policy` from `CodeExecutionTool` into the container's `network_policy` field
+- Collects `file_ids` from `openai_shell_uploaded_files` model settings AND `UploadedFile(target='container')` in messages (same gathering logic as `ShellTool`)
+- Uses typed SDK classes (`CodeInterpreter`, `CodeInterpreterContainerCodeInterpreterToolAuto`, `ContainerNetworkPolicyAllowlistParam`, `ContainerNetworkPolicyDisabledParam`) instead of raw dicts
+
 ### 4.2 `UploadedFile` Changes
 
 ```python

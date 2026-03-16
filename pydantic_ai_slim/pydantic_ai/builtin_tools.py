@@ -193,6 +193,14 @@ class CodeExecutionTool(AbstractBuiltinTool):
     * xAI
     """
 
+    network_policy: CodeExecutionNetworkPolicy | None = None
+    """Network access policy for the hosted container.
+
+    Supported by:
+
+    * OpenAI Responses
+    """
+
     kind: str = 'code_execution'
     """The kind of tool."""
 
@@ -499,7 +507,8 @@ class CodeExecutionNetworkPolicy:
     Controls whether code running in a hosted container can access the network,
     and if so, which domains are allowed.
 
-    Supported by OpenAI Responses (``container_auto`` environment).
+    Supported by OpenAI Responses (``container_auto`` environment) for both
+    :class:`CodeExecutionTool` and :class:`ShellTool`.
     """
 
     mode: Literal['disabled', 'allowlist']
@@ -565,7 +574,7 @@ class ShellTool(AbstractBuiltinTool):
             for part in msg.parts:
                 if (
                     isinstance(part, BuiltinToolCallPart)
-                    and part.tool_name == 'shell'
+                    and part.tool_name in ('shell', 'code_execution')
                     and isinstance(part.args, dict)
                 ):
                     if cid := part.args.get('container_id'):

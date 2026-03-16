@@ -113,6 +113,8 @@ try:
         ResponseFunctionShellToolCallOutput,
         WebSearchToolParam,
     )
+    from openai.types.responses.container_network_policy_allowlist_param import ContainerNetworkPolicyAllowlistParam
+    from openai.types.responses.container_network_policy_disabled_param import ContainerNetworkPolicyDisabledParam
     from openai.types.responses.container_reference_param import ContainerReferenceParam
     from openai.types.responses.local_environment_param import LocalEnvironmentParam
     from openai.types.responses.response_apply_patch_tool_call import (
@@ -1975,7 +1977,7 @@ class OpenAIResponsesModel(Model):
             elif isinstance(tool, CodeExecutionTool):
                 has_code_exec = True
                 has_image_generating_tool = True
-                tools.append({'type': 'code_interpreter', 'container': {'type': 'auto'}})
+                tools.append(_build_code_interpreter_param(tool, model_settings, messages))
             elif isinstance(tool, ShellTool):
                 has_shell = True
                 tools.append(_build_shell_tool_param(tool, model_settings, messages))
@@ -3522,6 +3524,37 @@ def _map_mcp_call(
             provider_name=provider_name,
         ),
     )
+
+
+def _build_code_interpreter_param(
+    tool: CodeExecutionTool,
+    model_settings: OpenAIResponsesModelSettings,
+    messages: list[ModelRequest | ModelResponse],
+) -> responses.tool_param.CodeInterpreter:
+    """Build a ``code_interpreter`` tool param with optional network_policy and file_ids."""
+    # Auto-reuse container from message history
+    if cid := ShellTool.get_container_id(messages):
+        return responses.tool_param.CodeInterpreter(type='code_interpreter', container=cid)
+
+    container = responses.tool_param.CodeInterpreterContainerCodeInterpreterToolAuto(type='auto')
+
+    if tool.network_policy:
+        if tool.network_policy.mode == 'disabled':
+            container['network_policy'] = ContainerNetworkPolicyDisabledParam(type='disabled')
+        else:
+            container['network_policy'] = ContainerNetworkPolicyAllowlistParam(
+                type='allowlist',
+                allowed_domains=list(tool.network_policy.allowed_domains),
+            )
+
+    file_ids: list[str] = []
+    if shell_files := model_settings.get('openai_shell_uploaded_files'):
+        file_ids.extend(f.file_id for f in shell_files)
+    file_ids.extend(_collect_container_file_ids(messages))
+    if file_ids:
+        container['file_ids'] = file_ids
+
+    return responses.tool_param.CodeInterpreter(type='code_interpreter', container=container)
 
 
 def _build_shell_tool_param(
