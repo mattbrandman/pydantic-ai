@@ -563,25 +563,35 @@ class AnthropicModel(Model):
                 return messages[-1].provider_details.get('container_id')
             return None
 
-        container: BetaContainerParams | None = None
+        container_id: str | None = None
         explicit = model_settings.get('anthropic_container')
         if explicit is not None:
-            container = None if explicit is False else explicit
+            if explicit is False:
+                pass  # Force fresh — no container reuse
+            elif isinstance(explicit, str):
+                container_id = explicit
+            else:
+                # BetaContainerParams from user — return directly with skills merged
+                skills = _get_shell_skills(model_request_parameters)
+                if skills:
+                    explicit['skills'] = skills
+                return explicit
         else:
             for m in reversed(messages):
                 if isinstance(m, ModelResponse) and m.provider_name == self.system and m.provider_details:
                     if cid := m.provider_details.get('container_id'):
-                        container = BetaContainerParams(id=cid)
+                        container_id = cid
                         break
 
-        # Add skills from ShellTool to the container params
+        # If we have a container_id and need skills, use BetaContainerParams
         skills = _get_shell_skills(model_request_parameters)
         if skills:
-            if container is None:
-                container = BetaContainerParams()
+            container = BetaContainerParams(id=container_id) if container_id else BetaContainerParams()
             container['skills'] = skills
+            return container
 
-        return container
+        # Plain string for reuse, None for fresh
+        return container_id
 
     async def _messages_count_tokens(
         self,
