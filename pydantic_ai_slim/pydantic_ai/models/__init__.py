@@ -24,7 +24,7 @@ from .._json_schema import JsonSchemaTransformer
 from .._output import OutputObjectDefinition, StructuredTextOutputSchema
 from .._parts_manager import ModelResponsePartsManager
 from .._run_context import RunContext
-from ..builtin_tools import AbstractBuiltinTool
+from ..builtin_tools import AbstractBuiltinTool, ShellTool
 from ..exceptions import UserError
 from ..messages import (
     BaseToolCallPart,
@@ -37,6 +37,7 @@ from ..messages import (
     ModelRequest,
     ModelResponse,
     ModelResponsePart,
+    ModelResponseState,
     ModelResponseStreamEvent,
     PartEndEvent,
     PartStartEvent,
@@ -58,6 +59,22 @@ DEFAULT_HTTP_TIMEOUT: int = 600
 This matches the default timeout used by OpenAI's Python client.
 See https://github.com/openai/openai-python/blob/v1.54.4/src/openai/_constants.py#L9
 """
+
+NATIVE_TOOL_FALLBACK_WARNED: set[tuple[str, str]] = set()
+
+
+def warn_native_tool_fallback(kind: str, provider: str) -> None:
+    """Emit a one-time warning when a native tool falls back to function tool format."""
+    key = (kind, provider)
+    if key not in NATIVE_TOOL_FALLBACK_WARNED:
+        NATIVE_TOOL_FALLBACK_WARNED.add(key)
+        warnings.warn(
+            f'Native `{kind}` tool: falling back to function tool format on {provider}'
+            ' — model performance may be degraded.',
+            UserWarning,
+            stacklevel=4,
+        )
+
 
 KnownModelName = TypeAliasType(
     'KnownModelName',
@@ -794,6 +811,15 @@ class Model(ABC):
                     f'Builtin tool(s) {unsupported_names} not supported by this model. Supported: {supported_names}'
                 )
 
+            # Check if ShellTool.network_policy is supported by this model
+            if not self.profile.supports_shell_network_policy:
+                for tool in params.builtin_tools:
+                    if isinstance(tool, ShellTool) and tool.network_policy is not None:
+                        raise UserError(
+                            '`ShellTool.network_policy` is not supported by this model. '
+                            'Only OpenAI Responses models support network policies on hosted shell containers.'
+                        )
+
         return model_settings, params
 
     @property
@@ -953,6 +979,8 @@ class StreamedResponse(ABC):
     provider_response_id: str | None = field(default=None, init=False)
     provider_details: dict[str, Any] | None = field(default=None, init=False)
     finish_reason: FinishReason | None = field(default=None, init=False)
+    state: ModelResponseState = field(default='complete', init=False)
+    metadata: dict[str, Any] | None = field(default=None, init=False)
 
     _parts_manager: ModelResponsePartsManager = field(default_factory=ModelResponsePartsManager, init=False)
     _event_iterator: AsyncIterator[ModelResponseStreamEvent] | None = field(default=None, init=False)
@@ -1049,6 +1077,8 @@ class StreamedResponse(ABC):
             provider_response_id=self.provider_response_id,
             provider_details=self.provider_details,
             finish_reason=self.finish_reason,
+            state=self.state,
+            metadata=self.metadata,
         )
 
     # TODO (v2): Make this a property
