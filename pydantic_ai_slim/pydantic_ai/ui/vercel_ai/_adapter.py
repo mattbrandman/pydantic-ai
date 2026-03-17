@@ -600,6 +600,9 @@ class VercelAIAdapter(UIAdapter[RequestData, UIMessage, BaseChunk, AgentDepsT, O
                     )
             elif isinstance(part, ToolCallPart):
                 ui_parts.extend(cls._dump_tool_call_part(part, tool_results))
+            elif isinstance(part, UploadedFile):  # pragma: no cover
+                # UploadedFile references in responses are not sent back to models that don't generate them.
+                pass
             else:
                 assert_never(part)
 
