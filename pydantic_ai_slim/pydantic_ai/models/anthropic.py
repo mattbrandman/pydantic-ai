@@ -1,7 +1,7 @@
 from __future__ import annotations as _annotations
 
 import io
-from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterable, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -63,7 +63,6 @@ from . import (
     get_user_agent,
     warn_native_tool_fallback,
 )
-from .wrapper import CompletedStreamedResponse
 
 _FINISH_REASON_MAP: dict[BetaStopReason, FinishReason] = {
     'compaction': 'stop',
@@ -396,27 +395,38 @@ class AnthropicModel(Model):
             model_request_parameters,
         )
         settings = cast(AnthropicModelSettings, model_settings or {})
+        # Check whether we're reusing a container from message history.
+        # Only an actual container_id means we might hit a stale-container error;
+        # skills alone (no id) can never be stale, so skip the check.
+        has_history_container = False
+        if not settings.get('anthropic_container'):
+            for m in reversed(messages):
+                if (
+                    isinstance(m, ModelResponse)
+                    and m.provider_name == self.system
+                    and m.provider_details
+                    and m.provider_details.get('container_id')
+                ):
+                    has_history_container = True
+                    break
         response = await self._messages_create(messages, True, settings, model_request_parameters)
         async with response:
-            streamed_response = await self._process_streamed_response(response, model_request_parameters)
-            # When reusing a container from history, consume the stream first to check for
-            # container errors. If all code execution results failed, retry with a fresh container.
-            has_history_container = (
-                not settings.get('anthropic_container')
-                and self._get_container(messages, settings, model_request_parameters) is not None
+            streamed_response = cast(
+                AnthropicStreamedResponse,
+                await self._process_streamed_response(response, model_request_parameters),
             )
+            # When reusing a container from history, install a retry callback so
+            # that if all code execution results are container errors, the stream
+            # transparently retries with a fresh container once fully consumed.
             if has_history_container:
-                async for _ in streamed_response:
-                    pass
-                model_response = streamed_response.get()
-                if _has_container_error_in_response(model_response):
-                    fresh_settings = cast(AnthropicModelSettings, {**settings, 'anthropic_container': False})
+                fresh_settings = cast(AnthropicModelSettings, {**settings, 'anthropic_container': False})
+
+                async def make_retry_request() -> ModelResponse:
                     retry = await self._messages_create(messages, False, fresh_settings, model_request_parameters)
-                    yield CompletedStreamedResponse(model_request_parameters, self._process_response(retry))
-                    return
-                yield CompletedStreamedResponse(model_request_parameters, model_response)
-            else:
-                yield streamed_response
+                    return self._process_response(retry)
+
+                streamed_response._container_retry_fn = make_retry_request
+            yield streamed_response
 
     def prepare_request(
         self, model_settings: ModelSettings | None, model_request_parameters: ModelRequestParameters
@@ -1433,6 +1443,14 @@ class AnthropicStreamedResponse(StreamedResponse):
     _provider_url: str
     _native_tool_names: dict[str, str] = field(default_factory=lambda: dict[str, str]())
     _timestamp: datetime = field(default_factory=_utils.now_utc)
+    _container_retry_fn: Callable[[], Awaitable[ModelResponse]] | None = field(default=None, init=False)
+    _container_retry_response: ModelResponse | None = field(default=None, init=False)
+
+    def get(self) -> ModelResponse:
+        """Return the retry response if a stale-container retry occurred, otherwise the streamed result."""
+        if self._container_retry_response is not None:
+            return self._container_retry_response
+        return super().get()
 
     async def _get_event_iterator(self) -> AsyncIterator[ModelResponseStreamEvent]:  # noqa: C901
         current_block: BetaContentBlock | None = None
@@ -1596,6 +1614,12 @@ class AnthropicStreamedResponse(StreamedResponse):
                 current_block = None
             elif isinstance(event, BetaRawMessageStopEvent):  # pragma: no branch
                 current_block = None
+
+        # After all events are consumed, check for stale-container errors.
+        # If all code execution results failed, retry with a fresh container.
+        if self._container_retry_fn is not None:
+            if _has_container_error_in_response(super().get()):
+                self._container_retry_response = await self._container_retry_fn()
 
     @property
     def model_name(self) -> AnthropicModelName:
