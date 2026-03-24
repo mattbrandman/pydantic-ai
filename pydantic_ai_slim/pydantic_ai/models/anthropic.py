@@ -569,6 +569,14 @@ class AnthropicModel(Model):
         model_request_parameters: ModelRequestParameters,
     ) -> BetaContainerParams | str | None:
         """Get container config for the API request."""
+        # On pause_turn continuation, pass just the container ID string to reconnect.
+        # Re-passing skills as BetaContainerParams triggers a prefill rejection on
+        # some models (e.g. Sonnet 4-6) even though plain string ID works fine.
+        if messages and isinstance(messages[-1], ModelResponse) and messages[-1].state == 'suspended':
+            if messages[-1].provider_details:
+                return messages[-1].provider_details.get('container_id')
+            return None
+
         container_id: str | None = None
         explicit = model_settings.get('anthropic_container')
         if explicit is not None:
