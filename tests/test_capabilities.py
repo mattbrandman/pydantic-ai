@@ -7144,3 +7144,98 @@ class TestModelRetryFromHooks:
                 ),
             ]
         )
+
+    async def test_after_model_request_model_retry_during_continuation(self):
+        """after_model_request raises ModelRetry during ContinueRequestNode — should retry gracefully."""
+        call_count = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Initial request: suspended response triggers ContinueRequestNode
+                return ModelResponse(parts=[TextPart(content='partial')], state='suspended')
+            elif call_count == 2:
+                # Continuation: complete response that the hook will reject
+                return make_text_response('bad continuation')
+            else:
+                # Retry (fresh ModelRequestNode): good response
+                return make_text_response('good response')
+
+        @dataclass
+        class RetryCap(AbstractCapability[Any]):
+            hook_call_count: int = 0
+
+            async def after_model_request(
+                self,
+                ctx: RunContext[Any],
+                *,
+                request_context: ModelRequestContext,
+                response: ModelResponse,
+            ) -> ModelResponse:
+                self.hook_call_count += 1
+                if self.hook_call_count == 2:
+                    # Reject the continuation response
+                    raise ModelRetry('Bad continuation, please retry')
+                return response
+
+        cap = RetryCap()
+        agent = Agent(FunctionModel(model_fn), capabilities=[cap])
+        result = await agent.run('hello')
+        assert result.output == 'good response'
+        assert call_count == 3
+        assert cap.hook_call_count == 3
+
+    async def test_after_model_request_model_retry_during_continuation_streaming(self):
+        """after_model_request raises ModelRetry during ContinueRequestNode streaming — should retry gracefully."""
+        request_call_count = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            """Non-streaming: used for initial request and retry after ModelRetry."""
+            nonlocal request_call_count
+            request_call_count += 1
+            if request_call_count == 1:
+                # Initial request: suspended response triggers ContinueRequestNode
+                return ModelResponse(parts=[TextPart(content='partial')], state='suspended')
+            else:
+                # Retry (fresh ModelRequestNode after ModelRetry): good response
+                return make_text_response('good response')
+
+        async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+            """Streaming: used for ContinueRequestNode continuation (which the hook rejects)."""
+            yield 'bad continuation'
+
+        @dataclass
+        class RetryCap(AbstractCapability[Any]):
+            hook_call_count: int = 0
+
+            async def after_model_request(
+                self,
+                ctx: RunContext[Any],
+                *,
+                request_context: ModelRequestContext,
+                response: ModelResponse,
+            ) -> ModelResponse:
+                self.hook_call_count += 1
+                if self.hook_call_count == 2:
+                    raise ModelRetry('Bad continuation, please retry')
+                return response
+
+        cap = RetryCap()
+        agent = Agent(FunctionModel(model_fn, stream_function=stream_fn), capabilities=[cap])
+
+        # Exercise ContinueRequestNode streaming via iter()
+        from pydantic_ai._agent_graph import ContinueRequestNode
+
+        async with agent.iter('hello') as agent_run:
+            node = agent_run.next_node
+            while not isinstance(node, End):
+                if isinstance(node, ContinueRequestNode):
+                    async with node.stream(agent_run.ctx) as stream:
+                        async for _event in stream:
+                            pass
+                node = await agent_run.next(node)
+
+        assert agent_run.result
+        assert agent_run.result.output == 'good response'
+        assert cap.hook_call_count == 3
