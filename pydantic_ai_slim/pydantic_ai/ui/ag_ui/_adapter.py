@@ -657,6 +657,10 @@ class AGUIAdapter(UIAdapter[RunAgentInput, Message, BaseEvent, AgentDepsT, Outpu
                             content=file_content,
                         )
                     )
+            elif isinstance(part, UploadedFile):
+                # UploadedFile references a provider-specific file by ID with no inline
+                # data, so there's no content to represent in AG-UI messages.
+                pass
             else:
                 assert_never(part)
 
