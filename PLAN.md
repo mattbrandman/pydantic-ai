@@ -1,109 +1,105 @@
-# PLAN: Remote Code Tools — ShellTool Builtin, Background Mode, Native Tool Adapters
+# PLAN: Local Native Toolsets — ShellToolset, TextEditorToolset, ApplyPatchToolset
 
 > **Issue refs:** #3365 (Anthropic/OpenAI Skills), #3963 (Shell/Bash builtin), #3794 (Text Editor tool)
-> **Related PRs:** #4600 (Anthropic Skills draft — absorbed into this plan)
-> **Stack:** `continuation-support` -> `skill-support-v2` (this) -> `local-tools`
->
-> **Depends on:** `continuation-support` (ContinueRequestNode, ModelResponseState, fallback continuation pinning)
+> **Stack:** `continuation-support` -> `skill-support-v2` -> `local-tools` (this)
+> **Depends on:** `skill-support-v2` (remote code tools, NativeToolDefinition infrastructure, model adapter native tool handling)
 
 ---
 
 ## Scope
 
-This change implements **remote/provider-hosted code execution** support, **OpenAI background mode**, and the **model adapter infrastructure** for both remote and local native tools. The continuation infrastructure it builds on is in the parent change (`continuation-support`).
-
-### What's in this change
-
-1. **`ShellTool` builtin** — provider-hosted shell with skills, network policy, container management, file uploads
-2. **OpenAI background mode** — async execution with polling for Responses API (produces `suspended` state consumed by `ContinueRequestNode`)
-3. **Anthropic `pause_turn` handling** — produces `suspended` state for long-running operations
-4. **`NativeToolDefinition` types** — typed discriminated union on `ToolDefinition` for provider-native tool presentation
-5. **Model adapter native tool infrastructure** — Anthropic and OpenAI adapters handle both remote and local native tool formats
-6. **Profile flags** — `supports_shell_network_policy`, `supports_native_shell_tool`, `supports_native_text_editor_tool`, `supports_native_apply_patch_tool`
-7. **`UploadedFile` changes** — `target` field, `part_kind`, `ModelResponsePart` union membership
-8. **Toolset base implementations** — `ShellToolset`, `TextEditorToolset`, `ApplyPatchToolset` source files (needed for import resolution; dedicated tests are in the follow-up)
-
-### What's in `continuation-support` (parent)
-
-- `ContinueRequestNode` in agent graph
-- `ModelResponseState` type on `ModelResponse` and `StreamedResponse`
-- Fallback model continuation pinning
-- All fallback continuation tests
-
-### What's in `local-tools` (follow-up)
-
-- `tests/test_shell_toolset.py` — dedicated unit tests for all three toolsets
-- VCR cassettes for local toolset integration tests
-- `docs/native-tools.md`, `docs/builtin-tools.md`, `docs/api/toolsets.md` — user-facing docs
+This change adds the **local native toolset implementations**, their dedicated tests, VCR cassettes, and documentation. The core infrastructure (NativeToolDefinition types, model adapter native tool handling, profile flags) is in the parent change (`skill-support-v2`).
 
 ---
 
-## 1. New Types
+## 1. Toolset Implementations
 
-### `builtin_tools.py`
+### 1.1 `ShellToolset` (`toolsets/shell.py`)
 
-- `ShellTool(AbstractBuiltinTool)` — provider-hosted shell with `skills`, `network_policy`
-- `SkillReference` — reference to a provider-hosted skill (`skill_id`, `version`, `source`)
-- `CodeExecutionNetworkPolicy` — network access policy (`mode`, `allowed_domains`)
+Client-executed shell using provider-native format when supported (Anthropic `bash_20250124`, OpenAI `shell` with `local` env), falling back to function tool otherwise.
 
-### `tools.py` — NativeToolDefinition
+- `ShellToolset.local(cwd, env)` — convenience constructor with subprocess-based executor
+- `ShellExecutor` protocol — pluggable execution backend
+- `_LocalShellExecutor` — persistent shell session (state persists across calls)
+- `ShellOutput` — `output: str`, `exit_code: int`
+- `sequential=True` on `ToolDefinition` (subprocess is single-threaded)
+- Timeout via `anyio.fail_after` -> `ModelRetry`
+- Output truncation at `max_output_chars`
 
-- `ShellNativeDefinition`, `TextEditorNativeDefinition`, `ApplyPatchNativeDefinition`
-- `NativeToolDefinition` union type
-- `native_definition` field on `ToolDefinition`
+### 1.2 `TextEditorToolset` (`toolsets/text_editor.py`)
 
-### `messages.py` — UploadedFile Changes
+Client-executed text editor using Anthropic's `text_editor_20250728` native format.
 
-- `UploadedFileTarget = Literal['message', 'container', 'both']`
-- `UploadedFile.target` and `UploadedFile.part_kind` fields
-- `UploadedFile` added to `ModelResponsePart` union
+- `TextEditorCommand` discriminated union: `view`, `str_replace`, `create`, `insert`
+- `TextEditorOutput` dataclass
+- `TextEditorExecuteFunc` callback — user provides the file operation implementation
+- `max_characters` config passed through to native definition
 
----
+### 1.3 `ApplyPatchToolset` (`toolsets/apply_patch.py`)
 
-## 2. Anthropic Adapter
+Client-executed patch application using OpenAI's `apply_patch` native format (V4A diffs).
 
-- `ShellTool` -> `BetaCodeExecutionTool20260120Param` (GA)
-- Skills -> `BetaSkillParams` in `container.skills` with `skills-2025-10-02` beta
-- Container ID persistence via `provider_details['container_id']`
-- Response blocks: `BetaBashCodeExecutionToolResultBlock`, `BetaTextEditorCodeExecutionToolResultBlock`
-- File outputs -> `UploadedFile` parts
-- `UploadedFile(target='container')` -> `BetaContainerUploadBlockParam`
-- Native local tools: `bash_20250124`, `text_editor_20250728` emission and name mapping
-- Container error retry: auto-recover from expired/missing containers
-- `pause_turn` -> `state='suspended'` (consumed by `ContinueRequestNode` from parent)
+- `ApplyPatchOperation`: `create_file`, `update_file`, `delete_file`
+- `ApplyPatchOutput` dataclass
+- `ApplyPatchExecuteFunc` callback — user provides the patch application implementation
 
 ---
 
-## 3. OpenAI Adapter
+## 2. Test Strategy
 
-- `ShellTool` -> `shell` tool with `container_auto` environment
-- Skills via `client.containers.create(skills=[...])`
-- Network policy, file mounting, container reuse
-- `shell_call` / `shell_call_output` mapping (discriminated by environment type)
-- `apply_patch` tool emission and response handling
-- **Background mode**: async execution with polling (`_get_continuation_info`, `_responses_retrieve`)
-  - Produces `state='suspended'` (consumed by `ContinueRequestNode` from parent)
-- Container expired auto-recovery with targeted retry
-- New settings: `openai_shell_uploaded_files`, `openai_shell_container`
+### 2.1 Unit Tests (`tests/test_shell_toolset.py`)
+
+- `ShellToolset.get_tools()` returns correct `ToolDefinition` with `native_definition`
+- `TextEditorToolset.get_tools()` returns correct definitions
+- `ApplyPatchToolset.get_tools()` returns correct definitions
+- Executor protocol compliance
+- Timeout and truncation behavior
+- Command parsing for each toolset
+
+### 2.2 VCR Integration Tests
+
+| Test | Provider | Streaming |
+|------|----------|-----------|
+| `test_anthropic_local_shell_toolset` | Anthropic | No |
+| `test_anthropic_local_shell_toolset_stream` | Anthropic | Yes |
+| `test_anthropic_text_editor_toolset` | Anthropic | No |
+| `test_anthropic_text_editor_toolset_stream` | Anthropic | Yes |
+| `test_openai_responses_local_shell_toolset` | OpenAI | No |
+| `test_openai_responses_local_shell_toolset_stream` | OpenAI | Yes |
+| `test_openai_responses_apply_patch_toolset` | OpenAI | No |
+| `test_openai_responses_apply_patch_toolset_stream` | OpenAI | Yes |
+
+### 2.3 Fallback Tests
+
+- `ShellToolset` with unsupported provider emits function tool + `warnings.warn()`
+- `TextEditorToolset` with unsupported provider emits function tool + warning
+- `ApplyPatchToolset` with unsupported provider emits function tool + warning
 
 ---
 
-## 4. Validation
+## 3. Documentation
 
-- `ShellTool` + `CodeExecutionTool` = `UserError` (mutually exclusive)
-- `ShellTool.network_policy` on unsupported provider = `UserError`
-- `UploadedFile(target='container')` without `ShellTool` = `UserError`
+- `docs/native-tools.md` — user-facing guide with decision tree, security warnings, examples
+- `docs/builtin-tools.md` — ShellTool builtin docs (remote)
+- `docs/api/toolsets.md` — API reference for toolset classes
+- `mkdocs.yml` — nav entry for native-tools page
 
 ---
 
-## 5. Capability Matrix
+## 4. Security
 
-| Feature                | Anthropic                    | OpenAI Responses                          | OpenAI Chat | Others |
-| ---------------------- | ---------------------------- | ----------------------------------------- | ----------- | ------ |
-| Remote shell (hosted)  | `code_execution_20260120`    | `shell` with `container_auto`             | No          | No     |
-| Skills                 | `skills-2025-10-02` beta     | Via containers                            | No          | No     |
-| Local bash (native)    | `bash_20250124`              | No                                        | No          | No     |
-| Local shell (native)   | No                           | `shell` with `local` env                  | No          | No     |
-| Local text editor      | `text_editor_20250728`       | No                                        | No          | No     |
-| Local apply_patch      | No                           | `apply_patch` (GPT-5.1+)                  | No          | No     |
-| Function tool fallback | Yes                          | Yes                                       | Yes         | Yes    |
+All shell-related docs include prominent warnings about running LLM-generated commands locally. Built-in safety mechanisms:
+
+- Output truncation (`max_output_chars`)
+- Timeout (`ShellToolset.timeout`)
+- `ApprovalRequiredToolset` composition for human-in-the-loop
+- `FilteredToolset` composition for command restrictions
+- `ShellExecutor` protocol gives users full control over execution
+
+---
+
+## 5. Future Work (Out of Scope)
+
+- **Capability wrapper**: `Shell`, `TextEditor`, `CodingEnvironment` capabilities that auto-route between remote and local
+- **Execution Environment integration** (post-PR #4393): `CodingEnvironment` backed by `ExecutionEnvironment` ABC
+- **`MemoryTool` refactor**: Replace with capability-driven pattern
