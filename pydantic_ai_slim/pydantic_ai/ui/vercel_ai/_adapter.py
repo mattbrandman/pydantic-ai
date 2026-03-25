@@ -607,7 +607,8 @@ class VercelAIAdapter(UIAdapter[RequestData, UIMessage, BaseChunk, AgentDepsT, O
                 ui_parts.extend(cls._dump_tool_call_part(part, tool_results))
             elif isinstance(part, CompactionPart):  # pragma: no cover
                 pass  # Compaction parts are not rendered in the UI
-            else:
+            elif isinstance(part, CompactionPart):  # pragma: no cover
+                pass  # Compaction parts are not rendered in the UI            else:
                 assert_never(part)
 
         return ui_parts

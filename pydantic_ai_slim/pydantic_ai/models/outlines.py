@@ -497,7 +497,9 @@ class OutlinesModel(Model):
                     elif isinstance(part, CompactionPart):  # pragma: no cover
                         # Compaction parts are not sent back to models that don't support compaction.
                         pass
-                    else:
+                    elif isinstance(part, CompactionPart):  # pragma: no cover
+                        # Compaction parts are not sent back to models that don't support compaction.
+                        pass                    else:
                         assert_never(part)
                 if len(text_parts) == 1 and len(image_parts) == 0:
                     chat.add_assistant_message(text_parts[0])

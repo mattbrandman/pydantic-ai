@@ -32,6 +32,7 @@ from ..messages import (
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
+    UploadedFile,
     UserContent,
     UserPromptPart,
 )
@@ -405,7 +406,8 @@ def _estimate_usage(messages: Iterable[ModelMessage]) -> usage.RequestUsage:
                     response_tokens += _estimate_string_tokens([part.content])
                 elif isinstance(part, CompactionPart):
                     pass
-                else:
+                elif isinstance(part, CompactionPart):
+                    pass                else:
                     assert_never(part)
         else:
             assert_never(message)

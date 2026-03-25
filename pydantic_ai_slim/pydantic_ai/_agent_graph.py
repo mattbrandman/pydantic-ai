@@ -1140,7 +1140,9 @@ class CallToolsNode(AgentNode[DepsT, NodeRunEndT]):
                     elif isinstance(part, _messages.CompactionPart):
                         if part.content:
                             compaction_text += part.content
-                    else:
+                    elif isinstance(part, _messages.CompactionPart):
+                        if part.content:
+                            compaction_text += part.content                    else:
                         assert_never(part)
 
                 # Use compaction content as text fallback when the response has no other
