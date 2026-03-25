@@ -3,6 +3,7 @@ from typing import Union
 from .._run_context import AgentDepsT
 from ._dynamic import ToolsetFunc
 from .abstract import AbstractToolset, ToolsetTool
+from .apply_patch import ApplyPatchToolset
 from .approval_required import ApprovalRequiredToolset
 from .combined import CombinedToolset
 from .external import DeferredToolset, ExternalToolset  # pyright: ignore[reportDeprecated]
@@ -11,6 +12,8 @@ from .function import FunctionToolset
 from .prefixed import PrefixedToolset
 from .prepared import PreparedToolset
 from .renamed import RenamedToolset
+from .shell import ShellToolset
+from .text_editor import TextEditorToolset
 from .wrapper import WrapperToolset
 
 AgentToolset = Union[AbstractToolset[AgentDepsT], ToolsetFunc[AgentDepsT]]  # noqa: UP007 — Union needed at runtime (no future annotations)
@@ -29,6 +32,9 @@ __all__ = (
     'PrefixedToolset',
     'RenamedToolset',
     'PreparedToolset',
+    'ShellToolset',
+    'TextEditorToolset',
+    'ApplyPatchToolset',
     'WrapperToolset',
     'ApprovalRequiredToolset',
 )
