@@ -355,6 +355,8 @@ class UIEventStream(ABC, Generic[RunInputT, EventT, AgentDepsT, OutputDataT]):
             case CompactionPart():  # pragma: no cover
                 async for e in self.handle_compaction(part):
                     yield e
+            case UploadedFile():  # pragma: no branch
+                pass  # UploadedFile references are exposed in history but not streamed as UI events
 
     async def handle_part_delta(self, event: PartDeltaEvent) -> AsyncIterator[EventT]:
         """Handle a PartDeltaEvent.
@@ -414,7 +416,7 @@ class UIEventStream(ABC, Generic[RunInputT, EventT, AgentDepsT, OutputDataT]):
             case BuiltinToolCallPart():
                 async for e in self.handle_builtin_tool_call_end(part):
                     yield e
-            case BuiltinToolReturnPart() | FilePart() | CompactionPart():  # pragma: no cover
+            case BuiltinToolReturnPart() | FilePart() | CompactionPart() | UploadedFile():
                 # These don't have deltas, so they don't need to be ended.
                 pass
 

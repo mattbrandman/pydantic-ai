@@ -32,6 +32,7 @@ from ..messages import (
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
+    UploadedFile,
     UserContent,
     UserPromptPart,
 )
@@ -404,6 +405,9 @@ def _estimate_usage(messages: Iterable[ModelMessage]) -> usage.RequestUsage:
                 elif isinstance(part, FilePart):
                     response_tokens += _estimate_string_tokens([part.content])
                 elif isinstance(part, CompactionPart):
+                    pass
+                elif isinstance(part, UploadedFile):  # pragma: no cover
+                    # UploadedFile references in responses are not sent back to models that don't generate them.
                     pass
                 else:
                     assert_never(part)
