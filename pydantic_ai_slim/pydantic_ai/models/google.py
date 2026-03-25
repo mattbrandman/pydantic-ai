@@ -1078,6 +1078,7 @@ class GeminiStreamedResponse(StreamedResponse):
                         )
                     elif part.executable_code is not None:
                         part_obj = self._handle_executable_code_streaming(part.executable_code)
+                        assert not isinstance(part_obj, UploadedFile)
                         part_obj.provider_details = provider_details
                         yield self._parts_manager.handle_part(vendor_part_id=uuid4(), part=part_obj)
                     elif part.code_execution_result is not None:
@@ -1195,6 +1196,8 @@ def _content_model_response(m: ModelResponse, provider_name: str) -> ContentDict
     function_call_requires_signature: bool = True
     for item in m.parts:
         part: PartDict = {}
+        if isinstance(item, UploadedFile):  # pragma: no cover
+            continue
         if (
             item.provider_details
             and (thought_signature := item.provider_details.get('thought_signature'))
@@ -1246,6 +1249,9 @@ def _content_model_response(m: ModelResponse, provider_name: str) -> ContentDict
             content = item.content
             inline_data_dict: BlobDict = {'data': content.data, 'mime_type': content.media_type}
             part['inline_data'] = inline_data_dict
+        elif isinstance(item, UploadedFile):  # pragma: no cover
+            # UploadedFile references in responses are not sent back to models that don't generate them.
+            pass
         else:
             assert_never(item)
 

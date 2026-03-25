@@ -10046,6 +10046,23 @@ async def test_openai_include_raw_annotations_non_streaming(allow_model_requests
     assert not (text_part2.provider_details or {}).get('annotations')
 
 
+def _text_response(text: str, *, status: ResponseStatus = 'completed') -> responses.Response:
+    """Create a Response with a single text output message."""
+    r = response_message(
+        [
+            ResponseOutputMessage(
+                id='output-1',
+                content=cast(list[Content], [ResponseOutputText(text=text, type='output_text', annotations=[])]),
+                role='assistant',
+                status='completed',
+                type='message',
+            )
+        ]
+    )
+    r.status = status
+    return r
+
+
 async def test_openai_responses_refusal_non_streaming(allow_model_requests: None):
     """Test that ResponseOutputRefusal in content triggers ContentFilterError."""
     c = response_message(
@@ -10077,100 +10094,6 @@ async def test_openai_responses_refusal_non_streaming(allow_model_requests: None
     assert response_msg['parts'] == []
     assert response_msg['finish_reason'] == 'content_filter'
     assert response_msg['provider_details']['refusal'] == "I can't help with that request."
-
-
-async def test_openai_responses_refusal_streaming(allow_model_requests: None):
-    """Test that ResponseRefusalDeltaEvent/DoneEvent in streaming triggers ContentFilterError."""
-    from openai.types import responses as resp
-
-    base_response = resp.Response(
-        id='resp_001',
-        model='gpt-4o',
-        object='response',
-        created_at=1704067200,
-        output=[],
-        parallel_tool_calls=True,
-        tool_choice='auto',
-        tools=[],
-    )
-
-    stream: list[resp.ResponseStreamEvent] = [
-        resp.ResponseCreatedEvent(response=base_response, type='response.created', sequence_number=0),
-        resp.ResponseInProgressEvent(response=base_response, type='response.in_progress', sequence_number=1),
-        resp.ResponseOutputItemAddedEvent(
-            item=ResponseOutputMessage(
-                id='msg_001',
-                content=[],
-                role='assistant',
-                status='in_progress',
-                type='message',
-            ),
-            output_index=0,
-            type='response.output_item.added',
-            sequence_number=2,
-        ),
-        ResponseRefusalDeltaEvent(
-            content_index=0,
-            delta="I can't help ",
-            item_id='msg_001',
-            output_index=0,
-            type='response.refusal.delta',
-            sequence_number=3,
-        ),
-        ResponseRefusalDeltaEvent(
-            content_index=0,
-            delta='with that.',
-            item_id='msg_001',
-            output_index=0,
-            type='response.refusal.delta',
-            sequence_number=4,
-        ),
-        ResponseRefusalDoneEvent(
-            content_index=0,
-            item_id='msg_001',
-            output_index=0,
-            refusal="I can't help with that.",
-            type='response.refusal.done',
-            sequence_number=5,
-        ),
-        resp.ResponseCompletedEvent(
-            response=base_response.model_copy(update={'status': 'completed'}),
-            type='response.completed',
-            sequence_number=6,
-        ),
-    ]
-
-    mock_client = MockOpenAIResponses.create_mock_stream(stream)
-    model = OpenAIResponsesModel('gpt-4o', provider=OpenAIProvider(openai_client=mock_client))
-    agent = Agent(model=model)
-
-    with pytest.raises(ContentFilterError, match='Content filter triggered') as exc_info:
-        async with agent.run_stream('harmful prompt'):
-            pass
-
-    assert exc_info.value.body is not None
-    body_json = json.loads(exc_info.value.body)
-    response_msg = body_json[0]
-    assert response_msg['parts'] == []
-    assert response_msg['finish_reason'] == 'content_filter'
-    assert response_msg['provider_details']['refusal'] == "I can't help with that."
-
-
-def _text_response(text: str, *, status: ResponseStatus = 'completed') -> responses.Response:
-    """Create a Response with a single text output message."""
-    r = response_message(
-        [
-            ResponseOutputMessage(
-                id='output-1',
-                content=cast(list[Content], [ResponseOutputText(text=text, type='output_text', annotations=[])]),
-                role='assistant',
-                status='completed',
-                type='message',
-            )
-        ]
-    )
-    r.status = status
-    return r
 
 
 @pytest.mark.vcr()
@@ -10234,7 +10157,7 @@ async def test_background_mode_with_tool_vcr(allow_model_requests: None, openai_
         model_settings=OpenAIResponsesModelSettings(openai_background=True),
     )
 
-    assert result.output == snapshot('The weather in Paris is currently sunny with a temperature of 72\u00b0F.')
+    assert result.output == snapshot('The weather in Paris is currently sunny with a temperature of 72°F.')
     assert result.all_messages() == snapshot(
         [
             ModelRequest(
@@ -10281,7 +10204,7 @@ async def test_background_mode_with_tool_vcr(allow_model_requests: None, openai_
             ModelResponse(
                 parts=[
                     TextPart(
-                        content='The weather in Paris is currently sunny with a temperature of 72\u00b0F.',
+                        content='The weather in Paris is currently sunny with a temperature of 72°F.',
                         id='msg_0e6b15873828668f00698b9df7c0bc8196ab1a99ca534cf1cd',
                         provider_name='openai',
                     )
@@ -10617,7 +10540,7 @@ async def test_background_passes_parameter(allow_model_requests: None):
 
 
 async def test_background_max_continuations(allow_model_requests: None):
-    """Background mode: stays in_progress beyond limit -> UnexpectedModelBehavior."""
+    """Background mode: stays in_progress beyond limit → UnexpectedModelBehavior."""
     retrieve_response = _text_response('still working...', status='in_progress')
 
     mock_client = MockOpenAIResponses(
@@ -10938,3 +10861,80 @@ async def test_stream_handles_queued_event(allow_model_requests: None):
 
     assert events == []
     assert request_stream.state == 'suspended'
+
+
+async def test_openai_responses_refusal_streaming(allow_model_requests: None):
+    """Test that ResponseRefusalDeltaEvent/DoneEvent in streaming triggers ContentFilterError."""
+    from openai.types import responses as resp
+
+    base_response = resp.Response(
+        id='resp_001',
+        model='gpt-4o',
+        object='response',
+        created_at=1704067200,
+        output=[],
+        parallel_tool_calls=True,
+        tool_choice='auto',
+        tools=[],
+    )
+
+    stream: list[resp.ResponseStreamEvent] = [
+        resp.ResponseCreatedEvent(response=base_response, type='response.created', sequence_number=0),
+        resp.ResponseInProgressEvent(response=base_response, type='response.in_progress', sequence_number=1),
+        resp.ResponseOutputItemAddedEvent(
+            item=ResponseOutputMessage(
+                id='msg_001',
+                content=[],
+                role='assistant',
+                status='in_progress',
+                type='message',
+            ),
+            output_index=0,
+            type='response.output_item.added',
+            sequence_number=2,
+        ),
+        ResponseRefusalDeltaEvent(
+            content_index=0,
+            delta="I can't help ",
+            item_id='msg_001',
+            output_index=0,
+            type='response.refusal.delta',
+            sequence_number=3,
+        ),
+        ResponseRefusalDeltaEvent(
+            content_index=0,
+            delta='with that.',
+            item_id='msg_001',
+            output_index=0,
+            type='response.refusal.delta',
+            sequence_number=4,
+        ),
+        ResponseRefusalDoneEvent(
+            content_index=0,
+            item_id='msg_001',
+            output_index=0,
+            refusal="I can't help with that.",
+            type='response.refusal.done',
+            sequence_number=5,
+        ),
+        resp.ResponseCompletedEvent(
+            response=base_response.model_copy(update={'status': 'completed'}),
+            type='response.completed',
+            sequence_number=6,
+        ),
+    ]
+
+    mock_client = MockOpenAIResponses.create_mock_stream(stream)
+    model = OpenAIResponsesModel('gpt-4o', provider=OpenAIProvider(openai_client=mock_client))
+    agent = Agent(model=model)
+
+    with pytest.raises(ContentFilterError, match='Content filter triggered') as exc_info:
+        async with agent.run_stream('harmful prompt'):
+            pass
+
+    assert exc_info.value.body is not None
+    body_json = json.loads(exc_info.value.body)
+    response_msg = body_json[0]
+    assert response_msg['parts'] == []
+    assert response_msg['finish_reason'] == 'content_filter'
+    assert response_msg['provider_details']['refusal'] == "I can't help with that."
