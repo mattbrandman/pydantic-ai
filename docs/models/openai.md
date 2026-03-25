@@ -128,11 +128,12 @@ The Responses API has built-in tools that you can use instead of building your o
 
 - [Web search](https://platform.openai.com/docs/guides/tools-web-search): allow models to search the web for the latest information before generating a response.
 - [Code interpreter](https://platform.openai.com/docs/guides/tools-code-interpreter): allow models to write and run Python code in a sandboxed environment before generating a response.
+- [Shell](https://platform.openai.com/docs/guides/tools-shell): allow models to execute code in a hosted container with bash and a text editor.
 - [Image generation](https://platform.openai.com/docs/guides/tools-image-generation): allow models to generate images based on a text prompt.
 - [File search](https://platform.openai.com/docs/guides/tools-file-search): allow models to search your files for relevant information before generating a response.
 - [Computer use](https://platform.openai.com/docs/guides/tools-computer-use): allow models to use a computer to perform tasks on your behalf.
 
-Web search, Code interpreter, Image generation, and File search are natively supported through the [Built-in tools](../builtin-tools.md) feature.
+Web search, Code interpreter, Shell, Image generation, and File search are natively supported through the [Built-in tools](../builtin-tools.md) feature.
 
 Computer use can be enabled by passing an [`openai.types.responses.ComputerToolParam`](https://github.com/openai/openai-python/blob/main/src/openai/types/responses/computer_tool_param.py) in the `openai_builtin_tools` setting on [`OpenAIResponsesModelSettings`][pydantic_ai.models.openai.OpenAIResponsesModelSettings]. It doesn't currently generate [`BuiltinToolCallPart`][pydantic_ai.messages.BuiltinToolCallPart] or [`BuiltinToolReturnPart`][pydantic_ai.messages.BuiltinToolReturnPart] parts in the message history, or streamed events; please submit an issue if you need native support for this built-in tool.
 
@@ -233,6 +234,32 @@ For advanced use cases, you can call [`compact_messages`][pydantic_ai.models.ope
 !!! tip
     For best results, combine compaction with [`openai_previous_response_id='auto'`](#automatically-referencing-earlier-responses) in your model settings. This lets OpenAI's server-side history work alongside compaction for improved context continuity. Note that this sends conversation data to OpenAI's server-side storage.
 
+#### Message Compaction
+
+The Responses API supports [compacting message history](https://platform.openai.com/docs/guides/conversation-state#compaction-advanced) to reduce token usage in long conversations. Compaction produces an encrypted summary that replaces older messages while preserving context.
+
+The easiest way to enable compaction is with the [`OpenAICompaction`][pydantic_ai.models.openai.OpenAICompaction] capability, which automatically calls the compact endpoint when the message count exceeds a threshold:
+
+```python {title="openai_compaction.py" test="skip"}
+from pydantic_ai import Agent
+from pydantic_ai.models.openai import OpenAICompaction
+
+agent = Agent(
+    'openai-responses:gpt-4o',
+    capabilities=[OpenAICompaction(message_count_threshold=10)],
+)
+
+message_history = []
+for question in ['What is 2+2?', 'And 3+3?', 'And 4+4?']:
+    result = agent.run_sync(question, message_history=message_history)
+    message_history = result.all_messages()
+    # After 10 messages, history is automatically compacted before each request
+```
+
+For advanced use cases, you can call [`compact_messages`][pydantic_ai.models.openai.OpenAIResponsesModel.compact_messages] directly on the model.
+
+!!! tip
+    For best results, combine compaction with [`openai_previous_response_id='auto'`](#automatically-referencing-earlier-responses) in your model settings. This lets OpenAI's server-side history work alongside compaction for improved context continuity. Note that this sends conversation data to OpenAI's server-side storage.
 ## OpenAI-compatible Models
 
 Many providers and models are compatible with the OpenAI API, and can be used with `OpenAIChatModel` in Pydantic AI.

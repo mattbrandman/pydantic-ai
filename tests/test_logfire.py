@@ -521,7 +521,8 @@ def test_logfire(
                                 'prefer_builtin': None,
                                 'return_schema': None,
                                 'include_return_schema': None,
-                            }
+
+                                'native_definition': None,                            }
                         ],
                         'builtin_tools': [],
                         'output_mode': 'text',
@@ -1021,7 +1022,8 @@ def test_instructions_with_structured_output_exclude_content_v2_v3(
                                 'prefer_builtin': None,
                                 'return_schema': None,
                                 'include_return_schema': None,
-                            }
+
+                                'native_definition': None,                            }
                         ],
                         'prompted_output_template': None,
                         'allow_text_output': False,

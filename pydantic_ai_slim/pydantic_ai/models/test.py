@@ -30,6 +30,7 @@ from ..messages import (
     ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
+    UploadedFile,
 )
 from ..profiles import ModelProfileSpec
 from ..settings import ModelSettings

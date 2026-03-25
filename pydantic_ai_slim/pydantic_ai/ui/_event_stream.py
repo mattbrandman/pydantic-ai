@@ -414,7 +414,7 @@ class UIEventStream(ABC, Generic[RunInputT, EventT, AgentDepsT, OutputDataT]):
             case BuiltinToolCallPart():
                 async for e in self.handle_builtin_tool_call_end(part):
                     yield e
-            case BuiltinToolReturnPart() | FilePart() | CompactionPart():  # pragma: no cover
+            case BuiltinToolReturnPart() | FilePart() | UploadedFile() | CompactionPart():  # pragma: no branch
                 # These don't have deltas, so they don't need to be ended.
                 pass
 
