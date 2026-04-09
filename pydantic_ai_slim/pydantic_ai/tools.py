@@ -37,6 +37,10 @@ __all__ = (
     'Tool',
     'ObjectJsonSchema',
     'ToolDefinition',
+    'ShellNativeDefinition',
+    'TextEditorNativeDefinition',
+    'ApplyPatchNativeDefinition',
+    'NativeToolDefinition',
     'DeferredToolRequests',
     'DeferredToolResults',
     'ToolApproved',
@@ -599,6 +603,36 @@ ToolKind: TypeAlias = Literal['function', 'output', 'external', 'unapproved']
 """Kind of tool."""
 
 
+@dataclass(kw_only=True)
+class ShellNativeDefinition:
+    """Native shell tool definition (Anthropic ``bash_20250124``, OpenAI ``shell`` with local env)."""
+
+    kind: Literal['shell'] = 'shell'
+
+
+@dataclass(kw_only=True)
+class TextEditorNativeDefinition:
+    """Native text editor tool definition (Anthropic ``text_editor_20250728``)."""
+
+    kind: Literal['text_editor'] = 'text_editor'
+    max_characters: int | None = None
+
+
+@dataclass(kw_only=True)
+class ApplyPatchNativeDefinition:
+    """Native apply_patch tool definition (OpenAI ``apply_patch``)."""
+
+    kind: Literal['apply_patch'] = 'apply_patch'
+
+
+NativeToolDefinition: TypeAlias = ShellNativeDefinition | TextEditorNativeDefinition | ApplyPatchNativeDefinition
+"""Union of provider-native tool definitions.
+
+When set on a :class:`ToolDefinition`, model adapters that support the native
+kind emit the provider-specific tool format instead of a generic function tool.
+"""
+
+
 @dataclass(repr=False, kw_only=True)
 class ToolDefinition:
     """Definition of a tool passed to a model.
@@ -691,6 +725,14 @@ class ToolDefinition:
     [`IncludeToolReturnSchemas`][pydantic_ai.capabilities.IncludeToolReturnSchemas] capability is used.
     """
 
+    native_definition: NativeToolDefinition | None = None
+    """Optional provider-native tool format hints.
+
+    When set, model adapters that support the native kind emit the
+    provider-specific tool format. Unsupported adapters fall back to
+    ``parameters_json_schema``.
+    """
+
     function_signature: FunctionSignature | None = field(default=None, repr=False, compare=False)
     """The function signature shape for this tool.
 
@@ -715,7 +757,6 @@ class ToolDefinition:
         """
         assert self.function_signature is not None, 'function_signature is not available for output tools'
         return self.function_signature.render(body, name=self.name, description=self.description, **kwargs)
-
     @property
     def defer(self) -> bool:
         """Whether calls to this tool will be deferred.

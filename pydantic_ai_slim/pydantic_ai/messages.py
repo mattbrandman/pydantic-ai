@@ -115,7 +115,23 @@ FinishReason: TypeAlias = Literal[
     'tool_call',
     'error',
 ]
-"""Reason the model finished generating the response, normalized to OpenTelemetry values."""
+"""Reason the model finished generating the response.
+
+Mostly normalized to OpenTelemetry semantic convention values.
+Whether the agent should automatically continue is determined by `ModelResponse.state`, not by this field.
+"""
+
+ModelResponseState: TypeAlias = Literal['complete', 'suspended']
+"""The state of a model response, indicating whether the response is final or requires further action.
+
+- `'complete'` — The response is done. This is the default state.
+- `'suspended'` — The model paused mid-turn and expects a continuation request.
+  Used by Anthropic `pause_turn` and OpenAI background mode.
+
+Additional states may be added in the future, e.g.:
+- User-initiated cancellation (see https://github.com/pydantic/pydantic-ai/issues/3219)
+- Model-side truncation (see https://github.com/pydantic/pydantic-ai/pull/4053)
+"""
 
 ForceDownloadMode: TypeAlias = bool | Literal['allow-local']
 """Type for the force_download parameter on FileUrl subclasses.
@@ -696,6 +712,14 @@ class CachePoint:
 UploadedFileProviderName: TypeAlias = Literal['anthropic', 'openai', 'google-gla', 'google-vertex', 'bedrock', 'xai']
 """Provider names supported by [`UploadedFile`][pydantic_ai.messages.UploadedFile]."""
 
+UploadedFileTarget: TypeAlias = Literal['message', 'container', 'both']
+"""Target for uploaded files: where the file should be sent.
+
+- ``'message'``: Sent as model-visible content (default, backward compatible).
+- ``'container'``: Mounted into the execution container only.
+- ``'both'``: Both message content and container mount.
+"""
+
 
 @pydantic_dataclass(repr=False, config=pydantic.ConfigDict(validate_by_name=True))
 class UploadedFile:
@@ -734,6 +758,14 @@ class UploadedFile:
 
     _: KW_ONLY
 
+    target: UploadedFileTarget = 'message'
+    """Where to send the file.
+
+    - ``'message'``: Sent as model-visible content (default, backward compatible).
+    - ``'container'``: Mounted into the execution container only. Requires `ShellTool`.
+    - ``'both'``: Both message content and container mount. Requires `ShellTool`.
+    """
+
     vendor_metadata: dict[str, Any] | None = None
     """Vendor-specific metadata for the file.
 
@@ -754,6 +786,9 @@ class UploadedFile:
     kind: Literal['uploaded-file'] = 'uploaded-file'
     """Type identifier, this is available on all parts as a discriminator."""
 
+    part_kind: Literal['uploaded-file'] = 'uploaded-file'
+    """Part type identifier when an uploaded file appears in a model response."""
+
     # `pydantic_dataclass` replaces `__init__` so this method is never used.
     # The signature is kept so that pyright/IDE hints recognize the `media_type` and `identifier` aliases.
     def __init__(
@@ -761,10 +796,12 @@ class UploadedFile:
         file_id: str,
         provider_name: UploadedFileProviderName,
         *,
+        target: UploadedFileTarget = 'message',
         media_type: str | None = None,
         vendor_metadata: dict[str, Any] | None = None,
         identifier: str | None = None,
         kind: Literal['uploaded-file'] = 'uploaded-file',
+        part_kind: Literal['uploaded-file'] = 'uploaded-file',
         # Required for inline-snapshot which expects all dataclass `__init__` methods to take all field names as kwargs.
         _media_type: str | None = None,
         _identifier: str | None = None,
@@ -1471,6 +1508,66 @@ class ModelRequest:
     __repr__ = _utils.dataclasses_no_defaults_repr
 
 
+@dataclass
+class UrlCitationSource:
+    """Citation source referencing a web URL or search result."""
+
+    url: str
+    """The URL of the cited source."""
+
+    _: KW_ONLY
+
+    title: str | None = None
+    """The title of the cited source, if available."""
+
+    source_kind: Literal['url'] = 'url'
+    """Source type identifier, used as a discriminator."""
+
+
+@dataclass
+class DocumentCitationSource:
+    """Citation source referencing a document provided in the request."""
+
+    document_index: int
+    """The 0-indexed position of the document in the request."""
+
+    _: KW_ONLY
+
+    document_title: str | None = None
+    """The title of the cited document, if available."""
+
+    source_kind: Literal['document'] = 'document'
+    """Source type identifier, used as a discriminator."""
+
+
+CitationSource = Annotated[
+    UrlCitationSource | DocumentCitationSource,
+    pydantic.Discriminator('source_kind'),
+]
+"""A discriminated union of citation source types."""
+
+
+@dataclass
+class Citation:
+    """A citation from a model response, linking response text to a source.
+
+    Each citation identifies a source (URL or document) and includes the exact text
+    that was cited. Provider-specific location details (character offsets, page numbers, etc.)
+    are stored in `provider_details`.
+    """
+
+    source: CitationSource
+    """The source being cited."""
+
+    cited_text: str
+    """The exact text from the source that supports the response."""
+
+    _: KW_ONLY
+
+    provider_details: dict[str, Any] | None = None
+    """Provider-specific citation location details (e.g., character offsets, page numbers)."""
+
+
 @dataclass(repr=False)
 class TextPart:
     """A plain text response from a model."""
@@ -1498,6 +1595,9 @@ class TextPart:
     This is used for data that is required to be sent back to APIs, as well as data users may want to access programmatically.
     When this field is set, `provider_name` is required to identify the provider that generated this data.
     """
+
+    citations: tuple[Citation, ...] | None = None
+    """Citations supporting this text, if the model provided them."""
 
     part_kind: Literal['text'] = 'text'
     """Part type identifier, this is available on all parts as a discriminator."""
@@ -1706,7 +1806,7 @@ class BuiltinToolCallPart(BaseToolCallPart):
 
 
 ModelResponsePart = Annotated[
-    TextPart | ToolCallPart | BuiltinToolCallPart | BuiltinToolReturnPart | ThinkingPart | FilePart,
+    TextPart | ToolCallPart | BuiltinToolCallPart | BuiltinToolReturnPart | ThinkingPart | FilePart | UploadedFile,
     pydantic.Discriminator('part_kind'),
 ]
 """A message part returned by a model."""
@@ -1762,6 +1862,24 @@ class ModelResponse:
 
     finish_reason: FinishReason | None = None
     """Reason the model finished generating the response, normalized to OpenTelemetry values."""
+
+    state: ModelResponseState = 'complete'
+    """The state of this response, indicating whether it is final or requires further action.
+
+    - `'complete'` — The response is done. This is the default.
+    - `'suspended'` — The model paused mid-turn and expects a continuation request.
+      The agent graph will automatically send a continuation request.
+      Set by providers that pause mid-turn (e.g. Anthropic `pause_turn`)
+      or return background/async responses (e.g. OpenAI background mode).
+    """
+
+    continuation_delay: float | None = None
+    """Seconds the graph should wait before sending the next continuation request.
+
+    Set by providers that return suspended (in-progress) responses, e.g. OpenAI background mode.
+    The agent graph reads this value in ``ContinueRequestNode`` so that durable execution
+    frameworks can intercept the sleep.
+    """
 
     run_id: str | None = None
     """The unique identifier of the agent run in which this message originated."""
@@ -2318,7 +2436,8 @@ class PartStartEvent:
     """The newly started `ModelResponsePart`."""
 
     previous_part_kind: (
-        Literal['text', 'thinking', 'tool-call', 'builtin-tool-call', 'builtin-tool-return', 'file'] | None
+        Literal['text', 'thinking', 'tool-call', 'builtin-tool-call', 'builtin-tool-return', 'file', 'uploaded-file']
+        | None
     ) = None
     """The kind of the previous part, if any.
 
@@ -2358,7 +2477,8 @@ class PartEndEvent:
     """The complete `ModelResponsePart`."""
 
     next_part_kind: (
-        Literal['text', 'thinking', 'tool-call', 'builtin-tool-call', 'builtin-tool-return', 'file'] | None
+        Literal['text', 'thinking', 'tool-call', 'builtin-tool-call', 'builtin-tool-return', 'file', 'uploaded-file']
+        | None
     ) = None
     """The kind of the next part, if any.
 
