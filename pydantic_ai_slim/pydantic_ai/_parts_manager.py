@@ -20,6 +20,7 @@ from typing import Any, TypeVar
 from pydantic_ai.exceptions import UnexpectedModelBehavior
 from pydantic_ai.messages import (
     BuiltinToolCallPart,
+    Citation,
     ModelResponsePart,
     ModelResponseStreamEvent,
     PartDeltaEvent,
@@ -254,6 +255,37 @@ class ModelResponsePartsManager:
             )
             self._parts[part_index] = part_delta.apply(existing_thinking_part)
             yield PartDeltaEvent(index=part_index, delta=part_delta)
+
+    def handle_citation_delta(
+        self,
+        *,
+        vendor_part_id: VendorId,
+        citation: Citation,
+    ) -> None:
+        """Append a citation to a TextPart identified by vendor ID.
+
+        This is used during streaming when citation deltas arrive separately from text deltas.
+        If a citation arrives before any text delta for the same content block, an empty TextPart
+        is created to hold the citation until text content arrives.
+
+        Args:
+            vendor_part_id: The vendor's ID for the content block this citation belongs to.
+            citation: The citation to append.
+
+        Raises:
+            UnexpectedModelBehavior: If the vendor ID corresponds to a non-TextPart.
+        """
+        part_index = self._vendor_id_to_part_index.get(vendor_part_id)
+        if part_index is None:
+            # Citation arrived before any text delta for this block; create an empty TextPart
+            part = TextPart(content='', citations=(citation,))
+            self._append_part(part, vendor_part_id)
+            return
+        existing_part = self._parts[part_index]
+        if not isinstance(existing_part, TextPart):
+            raise UnexpectedModelBehavior(f'Cannot apply a citation to {existing_part=}')
+        existing_citations = existing_part.citations or ()
+        self._parts[part_index] = replace(existing_part, citations=existing_citations + (citation,))
 
     def handle_tool_call_delta(
         self,

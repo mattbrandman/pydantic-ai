@@ -1508,6 +1508,66 @@ class ModelRequest:
     __repr__ = _utils.dataclasses_no_defaults_repr
 
 
+@dataclass
+class UrlCitationSource:
+    """Citation source referencing a web URL or search result."""
+
+    url: str
+    """The URL of the cited source."""
+
+    _: KW_ONLY
+
+    title: str | None = None
+    """The title of the cited source, if available."""
+
+    source_kind: Literal['url'] = 'url'
+    """Source type identifier, used as a discriminator."""
+
+
+@dataclass
+class DocumentCitationSource:
+    """Citation source referencing a document provided in the request."""
+
+    document_index: int
+    """The 0-indexed position of the document in the request."""
+
+    _: KW_ONLY
+
+    document_title: str | None = None
+    """The title of the cited document, if available."""
+
+    source_kind: Literal['document'] = 'document'
+    """Source type identifier, used as a discriminator."""
+
+
+CitationSource = Annotated[
+    UrlCitationSource | DocumentCitationSource,
+    pydantic.Discriminator('source_kind'),
+]
+"""A discriminated union of citation source types."""
+
+
+@dataclass
+class Citation:
+    """A citation from a model response, linking response text to a source.
+
+    Each citation identifies a source (URL or document) and includes the exact text
+    that was cited. Provider-specific location details (character offsets, page numbers, etc.)
+    are stored in `provider_details`.
+    """
+
+    source: CitationSource
+    """The source being cited."""
+
+    cited_text: str
+    """The exact text from the source that supports the response."""
+
+    _: KW_ONLY
+
+    provider_details: dict[str, Any] | None = None
+    """Provider-specific citation location details (e.g., character offsets, page numbers)."""
+
+
 @dataclass(repr=False)
 class TextPart:
     """A plain text response from a model."""
@@ -1535,6 +1595,9 @@ class TextPart:
     This is used for data that is required to be sent back to APIs, as well as data users may want to access programmatically.
     When this field is set, `provider_name` is required to identify the provider that generated this data.
     """
+
+    citations: tuple[Citation, ...] | None = None
+    """Citations supporting this text, if the model provided them."""
 
     part_kind: Literal['text'] = 'text'
     """Part type identifier, this is available on all parts as a discriminator."""

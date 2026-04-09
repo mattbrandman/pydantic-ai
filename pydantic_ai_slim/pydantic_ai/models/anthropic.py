@@ -31,6 +31,8 @@ from ..messages import (
     BuiltinToolCallPart,
     BuiltinToolReturnPart,
     CachePoint,
+    Citation,
+    DocumentCitationSource,
     DocumentUrl,
     FilePart,
     FinishReason,
@@ -49,6 +51,7 @@ from ..messages import (
     ToolReturnPart,
     UploadedFile,
     UploadedFileProviderName,
+    UrlCitationSource,
     UserPromptPart,
     VideoUrl,
     is_multi_modal_content,
@@ -97,8 +100,13 @@ try:
         BetaBashCodeExecutionToolResultBlockParam,
         BetaBashCodeExecutionToolResultError,
         BetaCacheControlEphemeralParam,
+        BetaCitationCharLocation,
+        BetaCitationContentBlockLocation,
+        BetaCitationPageLocation,
         BetaCitationsConfigParam,
         BetaCitationsDelta,
+        BetaCitationSearchResultLocation,
+        BetaCitationsWebSearchResultLocation,
         BetaCodeExecutionResultBlock,
         BetaCodeExecutionTool20250522Param,
         BetaCodeExecutionTool20260120Param,
@@ -144,6 +152,7 @@ try:
         BetaStopReason,
         BetaTextBlock,
         BetaTextBlockParam,
+        BetaTextCitation,
         BetaTextDelta,
         BetaTextEditorCodeExecutionToolResultBlock,
         BetaTextEditorCodeExecutionToolResultBlockParam,
@@ -687,7 +696,8 @@ class AnthropicModel(Model[AsyncAnthropicClient]):
         builtin_tool_calls: dict[str, BuiltinToolCallPart] = {}
         for item in response.content:
             if isinstance(item, BetaTextBlock):
-                items.append(TextPart(content=item.text))
+                citations = tuple(_map_citation(c) for c in item.citations) if item.citations else None
+                items.append(TextPart(content=item.text, citations=citations))
             elif isinstance(item, BetaServerToolUseBlock):
                 call_part = _map_server_tool_use_block(item, self.system)
                 builtin_tool_calls[call_part.tool_call_id] = call_part
@@ -1563,6 +1573,76 @@ def _map_usage(
     )
 
 
+def _map_citation(citation: BetaTextCitation) -> Citation:
+    """Convert an Anthropic citation to the unified Citation type."""
+    if isinstance(citation, BetaCitationsWebSearchResultLocation):
+        return Citation(
+            source=UrlCitationSource(url=citation.url, title=citation.title),
+            cited_text=citation.cited_text,
+            provider_details={'encrypted_index': citation.encrypted_index},
+        )
+    elif isinstance(citation, BetaCitationSearchResultLocation):
+        return Citation(
+            source=UrlCitationSource(url=citation.source, title=citation.title),
+            cited_text=citation.cited_text,
+            provider_details={
+                'search_result_index': citation.search_result_index,
+                'start_block_index': citation.start_block_index,
+                'end_block_index': citation.end_block_index,
+            },
+        )
+    elif isinstance(citation, BetaCitationCharLocation):
+        provider_details: dict[str, Any] = {
+            'type': 'char_location',
+            'start_char_index': citation.start_char_index,
+            'end_char_index': citation.end_char_index,
+        }
+        if citation.file_id:
+            provider_details['file_id'] = citation.file_id
+        return Citation(
+            source=DocumentCitationSource(
+                document_index=citation.document_index,
+                document_title=citation.document_title,
+            ),
+            cited_text=citation.cited_text,
+            provider_details=provider_details,
+        )
+    elif isinstance(citation, BetaCitationPageLocation):
+        provider_details = {
+            'type': 'page_location',
+            'start_page_number': citation.start_page_number,
+            'end_page_number': citation.end_page_number,
+        }
+        if citation.file_id:
+            provider_details['file_id'] = citation.file_id
+        return Citation(
+            source=DocumentCitationSource(
+                document_index=citation.document_index,
+                document_title=citation.document_title,
+            ),
+            cited_text=citation.cited_text,
+            provider_details=provider_details,
+        )
+    elif isinstance(citation, BetaCitationContentBlockLocation):
+        provider_details = {
+            'type': 'content_block_location',
+            'start_block_index': citation.start_block_index,
+            'end_block_index': citation.end_block_index,
+        }
+        if citation.file_id:
+            provider_details['file_id'] = citation.file_id
+        return Citation(
+            source=DocumentCitationSource(
+                document_index=citation.document_index,
+                document_title=citation.document_title,
+            ),
+            cited_text=citation.cited_text,
+            provider_details=provider_details,
+        )
+    else:
+        assert_never(citation)
+
+
 @dataclass
 class AnthropicStreamedResponse(StreamedResponse):
     """Implementation of `StreamedResponse` for Anthropic models."""
@@ -1723,9 +1803,11 @@ class AnthropicStreamedResponse(StreamedResponse):
                         )
                         if maybe_event is not None:  # pragma: no branch
                             yield maybe_event
-                    # TODO(Marcelo): We need to handle citations.
                     elif isinstance(event.delta, BetaCitationsDelta):
-                        pass
+                        self._parts_manager.handle_citation_delta(
+                            vendor_part_id=event.index,
+                            citation=_map_citation(event.delta.citation),
+                        )
 
                 elif isinstance(event, BetaRawMessageDeltaEvent):
                     self._usage = _map_usage(
