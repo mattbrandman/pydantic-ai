@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,14 +25,33 @@ class CompletedStreamedResponse(StreamedResponse):
     is returned.
     """
 
-    def __init__(self, model_request_parameters: ModelRequestParameters, response: ModelResponse):
+    def __init__(
+        self,
+        model_request_parameters: ModelRequestParameters,
+        response: ModelResponse,
+        *,
+        replay_events: bool = False,
+    ):
         super().__init__(model_request_parameters)
         self.response = response
+        self._replay_events = replay_events
 
     async def _get_event_iterator(self) -> AsyncIterator[ModelResponseStreamEvent]:
-        return
-        # noinspection PyUnreachableCode
-        yield
+        # The underlying stream was already consumed elsewhere (e.g. inside a durable-execution
+        # step/activity), so we only have the final response. By default we emit nothing: the
+        # events were already delivered to the consumer (e.g. an `event_stream_handler`) where the
+        # stream was originally consumed, and `get()` carries the final response.
+        #
+        # When `replay_events` is set, the original consumption discarded the events without
+        # delivering them (no handler), so replay the response's parts as `PartStartEvent`s — one
+        # per part, each carrying the full content — so this behaves like a real (if coarse)
+        # `StreamedResponse`. A consumer that drives the stream via events (e.g. the continuation
+        # composite stitching segments, or `stream_text()`) would otherwise observe an empty stream
+        # and lose all content, even though `get()` holds the full response.
+        if not self._replay_events:
+            return
+        for i, part in enumerate(self.response.parts):
+            yield self._parts_manager.handle_part(vendor_part_id=i, part=part)
 
     async def close_stream(self) -> None:
         # The stream was already consumed by the durable execution wrapper.
@@ -41,6 +60,7 @@ class CompletedStreamedResponse(StreamedResponse):
     def get(self) -> ModelResponse:
         return self.response
 
+    @property
     def usage(self) -> RequestUsage:
         return self.response.usage  # pragma: no cover
 
@@ -106,6 +126,9 @@ class WrapperModel(Model):
     ) -> ModelResponse:
         return await self.wrapped.compact_messages(request_context, instructions=instructions)  # pragma: no cover
 
+    async def cancel_suspended_response(self, response: ModelResponse) -> None:
+        return await self.wrapped.cancel_suspended_response(response)
+
     @asynccontextmanager
     async def request_stream(
         self,
@@ -113,7 +136,7 @@ class WrapperModel(Model):
         model_settings: ModelSettings | None,
         model_request_parameters: ModelRequestParameters,
         run_context: RunContext[Any] | None = None,
-    ) -> AsyncIterator[StreamedResponse]:
+    ) -> AsyncGenerator[StreamedResponse]:
         async with self.wrapped.request_stream(
             messages, model_settings, model_request_parameters, run_context
         ) as response_stream:
